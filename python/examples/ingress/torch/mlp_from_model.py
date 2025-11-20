@@ -14,7 +14,7 @@ import torch
 
 # MLIR infrastructure imports (only needed if you want to manipulate the MLIR module)
 from mlir import ir
-import mlir.dialects.func as func
+import mlir.dialects.func as func, memref
 
 # Lighthouse imports
 from lighthouse.ingress.torch import import_from_model
