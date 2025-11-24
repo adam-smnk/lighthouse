@@ -11,5 +11,4 @@ __all__ = [
     "memref_to_ctype",
     "memrefs_to_packed_args",
     "torch_to_memref",
-    "torch_to_packed_args",
 ]
