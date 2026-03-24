@@ -1,7 +1,7 @@
 from typing import Sequence, Optional
 
 from mlir import ir
-from mlir.dialects import ext, transform, func, arith, scf, memref
+from mlir.dialects import ext, transform, func, arith, scf, memref, linalg
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.utils.mlir import func_cif
@@ -364,3 +364,78 @@ def wrap_in_benching_func(
     if bench_name is not None:
         op.attributes["bench_name"] = ir.StringAttr.get(bench_name)
     return op.bench_func
+
+
+class GetElementwiseConsumers(
+    TransformExtensionDialect.Operation, name="get_eltwise_consumers"
+):
+    """
+    TODO: desc
+    """
+
+    target: ext.Operand[transform.AnyOpType]
+    ops: ext.Result[transform.AnyOpType[()]]
+
+    @classmethod
+    def attach_interface_impls(cls, ctx=None):
+        cls.TransformOpInterfaceModel.attach(cls.OPERATION_NAME, context=ctx)
+        cls.MemoryEffectsOpInterfaceModel.attach(cls.OPERATION_NAME, context=ctx)
+
+    @classmethod
+    def get_op_users(cls, val: ir.Value) -> list[ir.Operation]:
+        op_users = []
+        for use in val.uses:
+            user = use.owner
+            if not isinstance(user, ir.OpView):
+                continue
+            op_users.append(user.operation)
+        return op_users
+
+    @classmethod
+    def is_linalg_eltwise_op(cls, op: ir.Operation) -> bool:
+        linalg_eltwise_ops = [linalg.ElementwiseOp, linalg.AddOp, linalg.MulOp]
+        return any(
+            isinstance(op.opview, eltwise_op) for eltwise_op in linalg_eltwise_ops
+        )
+
+    class TransformOpInterfaceModel(transform.TransformOpInterface):
+        @staticmethod
+        def apply(
+            op: "GetElementwiseConsumers",
+            _rewriter: transform.TransformRewriter,
+            results: transform.TransformResults,
+            state: transform.TransformState,
+        ) -> DiagnosedSilenceableFailure:
+            target_ops = state.get_payload_ops(op.target)
+
+            if len(target_ops) != 1:
+                return DiagnosedSilenceableFailure.Failure
+
+            new_ops = []
+            target: ir.Operation = target_ops[0]
+            op_res = target.results
+            while len(op_res) == 1:
+                users = op.get_op_users(op_res[0])
+                print(f"num users: {len(users)}")
+                if len(users) != 1:
+                    break
+                user = users[0]
+                print(f"is eltwise: {op.is_linalg_eltwise_op(user)}")
+                if not op.is_linalg_eltwise_op(user):
+                    break
+                new_ops.append(user)
+                op_res = user.results
+
+            results.set_ops(op.ops, new_ops)
+            return DiagnosedSilenceableFailure.Success
+
+        @staticmethod
+        def allow_repeated_handle_operands(_op: "GetElementwiseConsumers") -> bool:
+            return False
+
+    class MemoryEffectsOpInterfaceModel(ir.MemoryEffectsOpInterface):
+        @staticmethod
+        def get_effects(op: ir.Operation, effects):
+            transform.only_reads_handle(op.op_operands, effects)
+            transform.produces_handle(op.results, effects)
+            transform.only_reads_payload(effects)

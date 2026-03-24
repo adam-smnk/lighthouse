@@ -20,6 +20,7 @@ import ml_dtypes
 import numpy as np
 from mlir import ir
 from mlir.dialects import linalg, transform
+from mlir.dialects import tensor as tensor_dialect
 from mlir.execution_engine import ExecutionEngine
 from mlir.dialects.transform import vector
 from mlir.dialects.transform import tensor
@@ -124,13 +125,17 @@ class Matmul(Workload):
             def payload(A, B, C):
                 a_tensor = bufferization.to_tensor(tensor_t(A_shape), A, restrict=True)
                 b_tensor = bufferization.to_tensor(tensor_t(B_shape), B, restrict=True)
+                c_tensor = bufferization.to_tensor(tensor_t(C_shape), C, restrict=True)
 
                 # Accumulate in F32.
                 fill = lh_mlir_utils.get_outputs(tensor_t(C_shape, f32_type))
                 matmul = linalg.matmul(a_tensor, b_tensor, outs=[fill])
+                e = tensor_dialect.empty(C_shape, f32_type)
+                add = linalg.add(matmul, c_tensor, outs=[e])
+                add = linalg.add(add, c_tensor, outs=[e])
 
                 bufferization.materialize_in_destination(
-                    None, matmul, C, restrict=True, writable=True
+                    None, add, C, restrict=True, writable=True
                 )
 
         return mod
@@ -142,147 +147,167 @@ class Matmul(Workload):
     ) -> list[ir.Module]:
         scheds = []
 
-        # Insert performance measurements.
-        scheds.append(get_bench_wrapper_schedule(self))
+        from lighthouse.dialects.transform_ext import GetElementwiseConsumers
 
-        # GEMM block packing.
-        # Create cache-friendly access pattern across matmul tiles.
-        scheds.append(
-            lh_schedule.block_pack_matmuls(
-                block_factors=[self.tile_size, self.tile_size, self.tile_size],
-                rhs_transpose_outer_block=True,
-                rhs_transpose_inner_block=False,
-            )
-        )
-        scheds.append(lh_schedule_x86.lower_packs_unpacks(self.tile_size))
-
-        # Convert to category ops for easier op matching.
         with lh_schedule.schedule_boilerplate() as (sched, named_seq):
-            ops = lh_transform.match_op(named_seq.bodyTarget, "func.func")
-            transform.apply_registered_pass(
-                transform.any_op_t(),
-                ops,
-                "linalg-morph-ops",
-                options={
-                    "named-to-category": True,
-                    "generic-to-category": True,
-                },
-            )
-            lh_transform.cleanup(named_seq.bodyTarget)
+            gemm = lh_transform.match_op(named_seq.bodyTarget, "linalg.matmul")
+            ops = GetElementwiseConsumers(gemm)
+            transform.print_(target=ops)
+            foreach_pack = transform.ForeachOp([], (ops,))
+            with ir.InsertionPoint(foreach_pack.body):
+                op = foreach_pack.bodyTargets[0]
+                lh_transform.tile_ops(op, tile_sizes=[1, 1])
+                transform.yield_()
             transform.yield_()
         scheds.append(sched)
+
+        with lh_schedule.schedule_boilerplate() as (sched, named_seq):
+            transform.print_()
+            transform.yield_()
+        scheds.append(sched)
+
+        # # Insert performance measurements.
+        # scheds.append(get_bench_wrapper_schedule(self))
+
+        # # GEMM block packing.
+        # # Create cache-friendly access pattern across matmul tiles.
+        # scheds.append(
+        #     lh_schedule.block_pack_matmuls(
+        #         block_factors=[self.tile_size, self.tile_size, self.tile_size],
+        #         rhs_transpose_outer_block=True,
+        #         rhs_transpose_inner_block=False,
+        #     )
+        # )
+        # scheds.append(lh_schedule_x86.lower_packs_unpacks(self.tile_size))
+
+        # # Convert to category ops for easier op matching.
+        # with lh_schedule.schedule_boilerplate() as (sched, named_seq):
+        #     ops = lh_transform.match_op(named_seq.bodyTarget, "func.func")
+        #     transform.apply_registered_pass(
+        #         transform.any_op_t(),
+        #         ops,
+        #         "linalg-morph-ops",
+        #         options={
+        #             "named-to-category": True,
+        #             "generic-to-category": True,
+        #         },
+        #     )
+        #     lh_transform.cleanup(named_seq.bodyTarget)
+        #     transform.yield_()
+        # scheds.append(sched)
 
         # GEMM cache tiling.
         # Create memory friendly access pattern.
-        gemm_op = "linalg.contract"
-        scheds.append(lh_schedule.tile(gemm_op, tile_sizes=[1, 1], fuse_producers=True))
+        # gemm_op = "linalg.contract"
+        # scheds.append(lh_schedule.tile(gemm_op, tile_sizes=[1, 1], fuse_producers=True))
+        
 
         # Fold extra parallel outer unit dims before further tiling to help later
         # vectorization rewrites to recognize ops.
-        scheds.append(lh_schedule.linalg_contract_fold_unit_dims())
+        # scheds.append(lh_schedule.linalg_contract_fold_unit_dims())
 
-        # GEMM register tiling.
-        # Ensure that computation can fit into vector registers.
-        reg_tile_batch = 1
-        reg_tile_m = 8
-        reg_tile_n = 32
-        reg_tile_k = 2
-        reg_peel_loops = []
-        assert self.tile_size % reg_tile_k == 0, "Invalid K dim register tiling"
-        if self.tile_size % reg_tile_n != 0:
-            reg_peel_loops.append(1)
-        if self.tile_size % reg_tile_m != 0:
-            reg_peel_loops.append(0)
-        scheds.append(
-            lh_schedule.tile(
-                gemm_op,
-                tile_sizes=[reg_tile_batch, reg_tile_m, reg_tile_n, reg_tile_k],
-                tile_interchange=[1, 2, 0, 3],
-                peel_loops=reg_peel_loops,
-            )
-        )
+        # # GEMM register tiling.
+        # # Ensure that computation can fit into vector registers.
+        # reg_tile_batch = 1
+        # reg_tile_m = 8
+        # reg_tile_n = 32
+        # reg_tile_k = 2
+        # reg_peel_loops = []
+        # assert self.tile_size % reg_tile_k == 0, "Invalid K dim register tiling"
+        # if self.tile_size % reg_tile_n != 0:
+        #     reg_peel_loops.append(1)
+        # if self.tile_size % reg_tile_m != 0:
+        #     reg_peel_loops.append(0)
+        # scheds.append(
+        #     lh_schedule.tile(
+        #         gemm_op,
+        #         tile_sizes=[reg_tile_batch, reg_tile_m, reg_tile_n, reg_tile_k],
+        #         tile_interchange=[1, 2, 0, 3],
+        #         peel_loops=reg_peel_loops,
+        #     )
+        # )
 
-        # GEMM register unroll.
-        # Ensure that shapes are compatible with target hardware instructions.
-        reg_unroll_m = 1
-        reg_unroll_n = 16
-        # When VNNI can be used, tuples of 32-bit elements are needed.
-        reg_unroll_k = 2 if self.dtype == ml_dtypes.bfloat16 else 1
-        reg_unroll_factors = [
-            reg_tile_m // reg_unroll_m,
-            reg_tile_n // reg_unroll_n,
-            reg_tile_k // reg_unroll_k,
-        ]
-        scheds.append(
-            lh_schedule.tile(
-                gemm_op,
-                tile_sizes=[0, reg_unroll_m, reg_unroll_n, reg_unroll_k],
-                unroll_factors=reg_unroll_factors,
-            )
-        )
+        # # GEMM register unroll.
+        # # Ensure that shapes are compatible with target hardware instructions.
+        # reg_unroll_m = 1
+        # reg_unroll_n = 16
+        # # When VNNI can be used, tuples of 32-bit elements are needed.
+        # reg_unroll_k = 2 if self.dtype == ml_dtypes.bfloat16 else 1
+        # reg_unroll_factors = [
+        #     reg_tile_m // reg_unroll_m,
+        #     reg_tile_n // reg_unroll_n,
+        #     reg_tile_k // reg_unroll_k,
+        # ]
+        # scheds.append(
+        #     lh_schedule.tile(
+        #         gemm_op,
+        #         tile_sizes=[0, reg_unroll_m, reg_unroll_n, reg_unroll_k],
+        #         unroll_factors=reg_unroll_factors,
+        #     )
+        # )
 
-        # Further tiling into hardware-friendly sizes for vectorization.
-        scheds.append(lh_schedule.tile("linalg.fill", tile_sizes=[1, 1, 1]))
-        scheds.append(lh_schedule.tile("linalg.generic", tile_sizes=[1, 8]))
+        # # Further tiling into hardware-friendly sizes for vectorization.
+        # scheds.append(lh_schedule.tile("linalg.fill", tile_sizes=[1, 1, 1]))
+        # scheds.append(lh_schedule.tile("linalg.generic", tile_sizes=[1, 8]))
 
-        if stop_at_stage == "tiled":
-            return scheds
+        # if stop_at_stage == "tiled":
+        #     return scheds
 
-        # Vectorization.
-        scheds.append(lh_schedule.vectorize_linalg())
-        scheds.append(lh_schedule.hoist_loops())
+        # # Vectorization.
+        # scheds.append(lh_schedule.vectorize_linalg())
+        # scheds.append(lh_schedule.hoist_loops())
 
-        with lh_schedule.schedule_boilerplate() as (sched, named_seq):
-            with ir.InsertionPoint(
-                transform.ApplyPatternsOp(named_seq.bodyTarget).patterns
-            ):
-                tensor.apply_patterns_tensor_fold_tensor_subset_ops_into_vector_transfers()
-                transform.apply_patterns_canonicalization()
-            transform.yield_()
-        scheds.append(sched)
+        # with lh_schedule.schedule_boilerplate() as (sched, named_seq):
+        #     with ir.InsertionPoint(
+        #         transform.ApplyPatternsOp(named_seq.bodyTarget).patterns
+        #     ):
+        #         tensor.apply_patterns_tensor_fold_tensor_subset_ops_into_vector_transfers()
+        #         transform.apply_patterns_canonicalization()
+        #     transform.yield_()
+        # scheds.append(sched)
 
-        # Rewrite vector ops into x86-specific sequences.
-        scheds.append(lh_schedule.x86_vectorization())
+        # # Rewrite vector ops into x86-specific sequences.
+        # scheds.append(lh_schedule.x86_vectorization())
 
-        # Lower to memrefs.
-        scheds.append(lh_schedule.bufferize(deallocation_pipeline=True))
+        # # Lower to memrefs.
+        # scheds.append(lh_schedule.bufferize(deallocation_pipeline=True))
 
-        # Apply x86 vectorization again as some patterns require memref abstraction.
-        scheds.append(lh_schedule.x86_vectorization())
-        # Vectorize any remaining ops.
-        scheds.append(lh_schedule.vectorize_all())
+        # # Apply x86 vectorization again as some patterns require memref abstraction.
+        # scheds.append(lh_schedule.x86_vectorization())
+        # # Vectorize any remaining ops.
+        # scheds.append(lh_schedule.vectorize_all())
 
-        # Cleanup vector ops.
-        with lh_schedule.schedule_boilerplate() as (sched, named_seq):
-            with ir.InsertionPoint(
-                transform.ApplyPatternsOp(named_seq.bodyTarget).patterns
-            ):
-                vector.apply_patterns_vector_flatten_vector_transfer_ops()
-                transform.apply_patterns_canonicalization()
-            lh_transform.cleanup(named_seq.bodyTarget)
-            transform.yield_()
-        scheds.append(sched)
+        # # Cleanup vector ops.
+        # with lh_schedule.schedule_boilerplate() as (sched, named_seq):
+        #     with ir.InsertionPoint(
+        #         transform.ApplyPatternsOp(named_seq.bodyTarget).patterns
+        #     ):
+        #         vector.apply_patterns_vector_flatten_vector_transfer_ops()
+        #         transform.apply_patterns_canonicalization()
+        #     lh_transform.cleanup(named_seq.bodyTarget)
+        #     transform.yield_()
+        # scheds.append(sched)
 
-        if stop_at_stage == "vectorized":
-            return scheds
+        # if stop_at_stage == "vectorized":
+        #     return scheds
 
-        # Lower to LLVM.
-        with lh_schedule.schedule_boilerplate() as (sched, named_seq):
-            target = named_seq.bodyTarget
-            target = apply_registered_pass(target, "convert-linalg-to-loops")
-            target = apply_registered_pass(target, "fold-memref-alias-ops")
-            target = apply_registered_pass(target, "expand-strided-metadata")
-            target = apply_registered_pass(target, "canonicalize")
-            target = apply_registered_pass(target, "convert-vector-to-scf")
-            target = apply_registered_pass(target, "lower-affine")
-            target = apply_registered_pass(target, "convert-scf-to-cf")
-            target = apply_registered_pass(target, "convert-vector-to-llvm")
-            target = apply_registered_pass(target, "convert-to-llvm")
-            target = apply_registered_pass(target, "reconcile-unrealized-casts")
-            lh_transform.cleanup(target)
+        # # Lower to LLVM.
+        # with lh_schedule.schedule_boilerplate() as (sched, named_seq):
+        #     target = named_seq.bodyTarget
+        #     target = apply_registered_pass(target, "convert-linalg-to-loops")
+        #     target = apply_registered_pass(target, "fold-memref-alias-ops")
+        #     target = apply_registered_pass(target, "expand-strided-metadata")
+        #     target = apply_registered_pass(target, "canonicalize")
+        #     target = apply_registered_pass(target, "convert-vector-to-scf")
+        #     target = apply_registered_pass(target, "lower-affine")
+        #     target = apply_registered_pass(target, "convert-scf-to-cf")
+        #     target = apply_registered_pass(target, "convert-vector-to-llvm")
+        #     target = apply_registered_pass(target, "convert-to-llvm")
+        #     target = apply_registered_pass(target, "reconcile-unrealized-casts")
+        #     lh_transform.cleanup(target)
 
-            transform.yield_()
-        scheds.append(sched)
+        #     transform.yield_()
+        # scheds.append(sched)
 
         return scheds
 
