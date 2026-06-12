@@ -51,7 +51,7 @@ def block_pack_matmuls(
                 "rhs-transpose-inner-blocks": rhs_transpose_inner_block,
             },
         )
-        lh_transform.pack_propagation(named_seq.bodyTarget)
+        # lh_transform.pack_propagation(named_seq.bodyTarget)
         lh_transform.cleanup(named_seq.bodyTarget)
 
         transform.yield_()

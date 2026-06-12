@@ -6,8 +6,10 @@ Pipeline:
 
   ## Buffer vectorization (gets rid of all the rest)
   - schedule: "vectorization.py[gen=x86_vectorization]"
-  - schedule: "vectorization.py[gen=vectorize_all]"
+  # - schedule: "vectorization.py[gen=vectorize_all]"
   - schedule: "vectorization.py[gen=flatten_vector_ops]"
+  # - schedule: "debug.py[gen=print_ir]"
 
   ## Lower to LLVM
   - include: llvm_lowering.yaml
+  # - schedule: "debug.py[gen=print_ir]"

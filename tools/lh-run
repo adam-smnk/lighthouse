@@ -10,6 +10,8 @@ from lighthouse.pipeline.descriptor import Descriptor
 from lighthouse.pipeline.driver import CompilerDriver, make_function_callable
 from lighthouse import dialects as lh_dialects
 
+import faulthandler
+faulthandler.enable()
 
 if __name__ == "__main__":
     Parser = argparse.ArgumentParser(
@@ -125,5 +127,8 @@ if __name__ == "__main__":
 
     # Optionally print the output tensor after execution.
     if args.print_tensor > 0:
+        import sys
+        import numpy
+        numpy.set_printoptions(threshold=sys.maxsize, precision=2, suppress=True)
         idx = args.print_tensor - 1
         print(f"Output: {buffers[idx]}")

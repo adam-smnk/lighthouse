@@ -1,6 +1,7 @@
 # This is an optimizing pipeline for kernel_bench matmul-like kernels.
 Pipeline:
   - include: pack_and_tile.yaml
+  # - schedule: "debug.py[gen=print_ir]"
 
   ## CPU specific register tiling (depends on uArch & data type)
   - schedule: "x86/register_tiling.py[gen=matmul_register_tiling] {
@@ -24,5 +25,6 @@ Pipeline:
   - schedule: "tiling.py[gen=tile_ops]{target_op=linalg.generic tile_sizes=$generic_tiling}"
 
   - include: vectorize.yaml
+  # - schedule: "debug.py[gen=print_ir]"
 
   - include: lower.yaml
