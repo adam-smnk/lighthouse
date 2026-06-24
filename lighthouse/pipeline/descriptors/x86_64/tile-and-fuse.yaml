@@ -1,0 +1,23 @@
+# Generic initial cache tiling and fusion.
+#
+# Generalizes the matmul-specific cache tiling (pack_and_tile.yaml) to arbitrary
+# KernelBench workloads using a three-step, attribute-driven strategy:
+#   1. assign target tile sizes to anchor ops (GEMMs take precedence)
+#   2. propagate the sizes to neighbouring elementwise / fill ops
+#   3. tile each fusable group at its root and greedily fuse producers
+#
+# Tiling aims for 2D tiles over the innermost parallel dims; batch/outer parallel
+# dims are tiled by 1 and reduction dims are left untiled. The default tile size
+# is 32 and can be overridden by including this file with {tile_size=<N>}.
+Pipeline:
+  # Combine elementwise chains so a single annotated group can be fused.
+  - pass: "linalg-fuse-elementwise-ops"
+
+  # Steps 1 + 2: anchor on GEMMs and propagate to consumers/producers.
+  - schedule: "tile_and_fuse.py[gen=assign_tile_sizes]{tile_size=$tile_size}"
+
+  # Steps 1 + 2 (fallback): anchor any leftover elementwise ops without a GEMM.
+  - schedule: "tile_and_fuse.py[gen=assign_elementwise_tile_sizes]{tile_size=$tile_size}"
+
+  # Step 3: tile each fusable group at its root and fuse its producers.
+  - schedule: "tile_and_fuse.py[gen=tile_and_fuse_annotated]"

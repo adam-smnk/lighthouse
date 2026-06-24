@@ -2,8 +2,12 @@ from .dialect import register_and_load
 from .dialect import TransformExtensionDialect
 
 from .ops.wrap_in_benching_func import wrap_in_benching_func
+from .ops.assign_tile_sizes import assign_tile_sizes
 from .ops.get_named_attribute import get_named_attribute
+from .ops.get_fusion_roots import get_fusion_roots
+from .ops.get_tile_sizes import get_tile_sizes
 from .ops.param_cmp_eq import param_cmp_eq
+from .ops.propagate_tile_sizes import propagate_tile_sizes
 from .ops.replace import replace
 from .ops.convert_func_results_to_args import convert_func_results_to_args
 from .ops.extract_handle import extract_handle
@@ -16,15 +20,19 @@ from .ops.move_offsets_to_subview import move_offsets_to_subview
 
 __all__ = [
     "TransformExtensionDialect",
+    "assign_tile_sizes",
     "convert_func_results_to_args",
     "extract_handle",
     "filter_num_loops",
+    "get_fusion_roots",
     "get_named_attribute",
     "get_named_attribute",
+    "get_tile_sizes",
     "get_tileable_consumers",
     "get_tiling_sizes",
     "move_offsets_to_subview",
     "param_cmp_eq",
+    "propagate_tile_sizes",
     "register_and_load",
     "replace",
     "replace_with_fused_attention",
