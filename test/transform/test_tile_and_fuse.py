@@ -118,6 +118,71 @@ module {
 }
 """
 
+# Two GEMMs chained through a relu. The relu is the epilogue of the first matmul
+# and the "prologue" of the second: it must be tiled to match its producer GEMM.
+TWO_GEMM = """
+#map = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<64x64xf32>, %w0: tensor<64x64xf32>, %w1: tensor<64x64xf32>) -> tensor<64x64xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<64x64xf32>
+    %f0 = linalg.fill ins(%cst: f32) outs(%e0: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mm0 = linalg.matmul ins(%a, %w0: tensor<64x64xf32>, tensor<64x64xf32>) outs(%f0: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %relu0 = linalg.generic {indexing_maps=[#map,#map], iterator_types=["parallel","parallel"]} ins(%mm0: tensor<64x64xf32>) outs(%e0: tensor<64x64xf32>) {
+    ^bb0(%in: f32, %o: f32):
+      %c = arith.cmpf ugt, %in, %cst : f32
+      %s = arith.select %c, %in, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<64x64xf32>
+    %f1 = linalg.fill ins(%cst: f32) outs(%e0: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mm1 = linalg.matmul ins(%relu0, %w1: tensor<64x64xf32>, tensor<64x64xf32>) outs(%f1: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %relu1 = linalg.generic {indexing_maps=[#map,#map], iterator_types=["parallel","parallel"]} ins(%mm1: tensor<64x64xf32>) outs(%e0: tensor<64x64xf32>) {
+    ^bb0(%in: f32, %o: f32):
+      %c = arith.cmpf ugt, %in, %cst : f32
+      %s = arith.select %c, %in, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<64x64xf32>
+    return %relu1 : tensor<64x64xf32>
+  }
+}
+"""
+
+# A 3-layer MLP: each layer is matmul + bias-add + relu (last layer bias only).
+MLP3 = """
+#map = affine_map<(d0, d1) -> (d0, d1)>
+#map1 = affine_map<(d0, d1) -> (d1)>
+module {
+  func.func @main(%x: tensor<64x64xf32>, %w0: tensor<64x64xf32>, %b0: tensor<64xf32>, %w1: tensor<64x64xf32>, %b1: tensor<64xf32>, %w2: tensor<64x64xf32>, %b2: tensor<64xf32>) -> tensor<64x64xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<64x64xf32>
+    %f0 = linalg.fill ins(%cst: f32) outs(%e: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mm0 = linalg.matmul ins(%x, %w0: tensor<64x64xf32>, tensor<64x64xf32>) outs(%f0: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %a0 = linalg.generic {indexing_maps=[#map,#map1,#map], iterator_types=["parallel","parallel"]} ins(%mm0, %b0: tensor<64x64xf32>, tensor<64xf32>) outs(%e: tensor<64x64xf32>) {
+    ^bb0(%in: f32, %ib: f32, %o: f32):
+      %s = arith.addf %in, %ib : f32
+      %c = arith.cmpf ugt, %s, %cst : f32
+      %r = arith.select %c, %s, %cst : f32
+      linalg.yield %r : f32
+    } -> tensor<64x64xf32>
+    %mm1 = linalg.matmul ins(%a0, %w1: tensor<64x64xf32>, tensor<64x64xf32>) outs(%f0: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %a1 = linalg.generic {indexing_maps=[#map,#map1,#map], iterator_types=["parallel","parallel"]} ins(%mm1, %b1: tensor<64x64xf32>, tensor<64xf32>) outs(%e: tensor<64x64xf32>) {
+    ^bb0(%in: f32, %ib: f32, %o: f32):
+      %s = arith.addf %in, %ib : f32
+      %c = arith.cmpf ugt, %s, %cst : f32
+      %r = arith.select %c, %s, %cst : f32
+      linalg.yield %r : f32
+    } -> tensor<64x64xf32>
+    %mm2 = linalg.matmul ins(%a1, %w2: tensor<64x64xf32>, tensor<64x64xf32>) outs(%f0: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %a2 = linalg.generic {indexing_maps=[#map,#map1,#map], iterator_types=["parallel","parallel"]} ins(%mm2, %b2: tensor<64x64xf32>, tensor<64xf32>) outs(%e: tensor<64x64xf32>) {
+    ^bb0(%in: f32, %ib: f32, %o: f32):
+      %s = arith.addf %in, %ib : f32
+      linalg.yield %s : f32
+    } -> tensor<64x64xf32>
+    return %a2 : tensor<64x64xf32>
+  }
+}
+"""
+
 
 # A GEMM anchors tiling; its tile sizes are propagated to the fill producer and
 # the elementwise (bias, relu) consumers, then the whole group is fused.
@@ -164,3 +229,50 @@ run("batch_matmul", BMM, assign_gemm)
 # CHECK: linalg.generic
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 0>
 run("reduction", REDUCE, assign_elementwise)
+
+
+# Two consecutive GEMMs: the shared relu is the epilogue of the first matmul, so
+# it must be tiled to match that matmul's M/N tiles (2D, not the second matmul's
+# M/K prologue tiles). The first matmul is followed by a fully-tiled relu.
+# CHECK-LABEL: Test: two_consecutive_gemms_assign
+# CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("two_consecutive_gemms_assign", TWO_GEMM, assign_gemm)
+
+
+# GEMMs act as fusion barriers: two consecutive GEMMs are NOT fused together.
+# Each GEMM + its epilogue forms its own scf.forall; the second reads the first
+# loop's result through a slice (proving they are separate).
+# CHECK-LABEL: Test: two_consecutive_gemms_fuse
+# CHECK: %[[F0:.+]] = scf.forall
+# CHECK: linalg.matmul
+# CHECK: scf.forall.in_parallel
+# CHECK: scf.forall
+# CHECK: tensor.extract_slice %[[F0]]
+# CHECK: linalg.matmul
+# CHECK: scf.forall.in_parallel
+run("two_consecutive_gemms_fuse", TWO_GEMM, assign_gemm, tile_and_fuse)
+
+
+# A 3-layer MLP: each layer (GEMM + epilogue) becomes its own fused scf.forall,
+# chained through the loop results. Each forall fuses its own (shared) fill.
+# CHECK-LABEL: Test: mlp_three_layers
+# CHECK: %[[L0:.+]] = scf.forall
+# CHECK: linalg.fill
+# CHECK: linalg.matmul
+# CHECK: linalg.generic
+# CHECK: scf.forall.in_parallel
+# CHECK: %[[L1:.+]] = scf.forall
+# CHECK: tensor.extract_slice %[[L0]]
+# CHECK: linalg.fill
+# CHECK: linalg.matmul
+# CHECK: linalg.generic
+# CHECK: scf.forall.in_parallel
+# CHECK: scf.forall
+# CHECK: tensor.extract_slice %[[L1]]
+# CHECK: linalg.fill
+# CHECK: linalg.matmul
+# CHECK: linalg.generic
+# CHECK: scf.forall.in_parallel
+run("mlp_three_layers", MLP3, assign_gemm, tile_and_fuse)

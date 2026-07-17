@@ -19,10 +19,18 @@ class PropagateTileSizesOp(
     maps so that a shared tensor is tiled consistently on both sides, which makes
     the annotations usable as fusion hints.
 
-    Propagation flows in both directions (to consumers and producers) and only
-    targets tileable elementwise-like ops; contraction (anchor) ops are never
-    re-tiled. Reduction dimensions are never tiled. Ops that are already
-    annotated keep their existing sizes and act as propagation barriers.
+    Propagation happens in two phases so that a GEMM's epilogue takes precedence
+    over a downstream GEMM's prologue for a shared elementwise op:
+
+      1. forward (epilogue): from the anchors, follow consumers and claim the
+         elementwise ops downstream of each anchor. This stops at the next GEMM,
+         so an op between two GEMMs is tiled to match its *producer* GEMM.
+      2. backward (prologue): from all annotated ops, follow producers and claim
+         the remaining upstream elementwise / fill ops.
+
+    Only tileable elementwise-like ops are targeted; contraction (anchor) ops are
+    never re-tiled and act as barriers. Reduction dimensions are never tiled.
+    Ops that are already annotated keep their existing sizes.
 
     Args:
         root: Handle to annotated anchor op(s).
@@ -49,56 +57,63 @@ class PropagateTileSizesOp(
         ) -> DiagnosedSilenceableFailure:
             root_ops = list(state.get_payload_ops(op.root))
 
-            # Worklist flood-fill across shared tensors. An op is "visited" once
-            # it carries an annotation, which prevents re-processing and acts as
-            # a barrier. Track ordered, de-duplicated annotated ops for results.
+            # An op is "visited" once it carries an annotation, which prevents
+            # re-processing and acts as a barrier. Track ordered, de-duplicated
+            # annotated ops for the result handle.
             annotated: list[ir.Operation] = []
-            seen_results: set = set()
+            seen: set = set()
 
             def remember(target_op: ir.Operation) -> None:
                 key = target_op.operation.__hash__()
-                if key not in seen_results:
-                    seen_results.add(key)
+                if key not in seen:
+                    seen.add(key)
                     annotated.append(target_op)
 
-            worklist: list[ir.Operation] = []
-            for root in root_ops:
-                if tsa.get_tile_sizes_attr(root) is not None:
-                    remember(root)
-                    worklist.append(root)
-
-            def try_propagate(
+            def claim(
                 src: ir.Operation, src_sizes, shared: ir.Value, dst: ir.Operation
-            ) -> None:
+            ) -> ir.Operation | None:
                 if tsa.get_tile_sizes_attr(dst) is not None:
-                    return
+                    return None
                 if not tsa.is_propagatable(dst):
-                    return
+                    return None
                 dst_sizes = tsa.propagate_through_value(src, src_sizes, shared, dst)
                 if dst_sizes is None or not any(dst_sizes):
-                    return
+                    return None
                 tsa.set_tile_sizes_attr(dst, dst_sizes)
                 remember(dst)
-                worklist.append(dst)
+                return dst
 
-            while worklist:
-                src = worklist.pop()
+            seeds = [r for r in root_ops if tsa.get_tile_sizes_attr(r) is not None]
+            for seed in seeds:
+                remember(seed)
+
+            # Phase 1: forward (epilogue) propagation from the anchors.
+            forward: list[ir.Operation] = list(seeds)
+            idx = 0
+            while idx < len(forward):
+                src = forward[idx]
+                idx += 1
                 src_sizes = tsa.get_tile_sizes_attr(src)
-                if src_sizes is None:
-                    continue
-                src_view = src.opview
-
-                # Forward: annotate tileable consumers of each result.
-                for result in src_view.results:
+                for result in src.opview.results:
                     for user in tsa.op_users(result):
-                        try_propagate(src, src_sizes, result, user)
+                        dst = claim(src, src_sizes, result, user)
+                        if dst is not None:
+                            forward.append(dst)
 
-                # Backward: annotate tileable producers feeding any operand
-                # (inputs and DPS init/outputs, e.g. a fill feeding a matmul).
-                for operand in src_view.operands:
+            # Phase 2: backward (prologue) propagation from all annotated ops.
+            backward: list[ir.Operation] = list(annotated)
+            idx = 0
+            while idx < len(backward):
+                src = backward[idx]
+                idx += 1
+                src_sizes = tsa.get_tile_sizes_attr(src)
+                for operand in src.opview.operands:
                     producer = tsa.defining_op(operand)
-                    if producer is not None:
-                        try_propagate(src, src_sizes, operand, producer)
+                    if producer is None:
+                        continue
+                    dst = claim(src, src_sizes, operand, producer)
+                    if dst is not None:
+                        backward.append(dst)
 
             results.set_ops(op.annotated, annotated)
             return DiagnosedSilenceableFailure.Success

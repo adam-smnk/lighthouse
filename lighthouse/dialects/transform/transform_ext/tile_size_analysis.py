@@ -303,6 +303,40 @@ def propagate_through_value(
     return dst_sizes
 
 
+def is_gemm(op: "ir.Operation | ir.OpView") -> bool:
+    """Whether the op is a genuine GEMM-like contraction (fusion barrier)."""
+    return contraction_dims(op) is not None
+
+
+def has_gemm_ancestor(op: "ir.Operation | ir.OpView") -> bool:
+    """Whether a GEMM is reachable going backward through annotated producers.
+
+    Used to tell an epilogue op (downstream of a GEMM, e.g. a bias/relu after a
+    matmul) apart from a pure prologue op (upstream of a GEMM, e.g. a fill).
+    Only annotated ops are traversed; the GEMM itself is a barrier.
+    """
+    visited: set = set()
+    stack: list = []
+
+    def push_producers(cur: "ir.Operation | ir.OpView") -> None:
+        for operand in _opview(cur).operands:
+            producer = defining_op(operand)
+            if producer is not None and get_tile_sizes_attr(producer) is not None:
+                stack.append(producer)
+
+    push_producers(op)
+    while stack:
+        cur = stack.pop()
+        key = cur.operation.__hash__()
+        if key in visited:
+            continue
+        visited.add(key)
+        if is_gemm(cur):
+            return True
+        push_producers(cur)
+    return False
+
+
 def op_users(value: ir.Value) -> list[ir.Operation]:
     """Return the ops that use `value`."""
     users = []

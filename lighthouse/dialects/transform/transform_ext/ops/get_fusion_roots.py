@@ -8,18 +8,28 @@ from lighthouse.dialects.transform.transform_ext import tile_size_analysis as ts
 
 class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roots"):
     """
-    Select the fusion roots among tile-size annotated ops.
+    Select the fusion roots among tile-size annotated ops, with GEMM barriers.
 
-    Given a set of candidate ops, keep those carrying a `transform_ext.tile_sizes`
-    annotation whose result is not consumed by another annotated op. These
-    "terminal" ops are the roots of each fusable group: tiling a root and
-    greedily fusing its producers pulls the whole annotated group (e.g. a GEMM
-    and its elementwise consumers) into a single tiled loop.
+    Given a set of candidate ops, return the roots of each fusable group. A
+    group is a GEMM together with its elementwise prologue (producers) and
+    epilogue (consumers); GEMMs act as barriers so that consecutive GEMMs are
+    not fused together. Tiling a returned root and greedily fusing its producers
+    pulls exactly one group into a single tiled loop (when the roots are
+    processed top-down, so an already-fused upstream group blocks fusion).
+
+    An annotated op is a fusion root when its result does not feed another
+    elementwise op of the same group, i.e.:
+      * it has no annotated non-GEMM consumer (it is the end of an elementwise
+        chain, only feeding a GEMM barrier or a non-annotated op), and
+      * it is not a pure prologue op feeding a GEMM (e.g. a fill): such ops are
+        fused as producers of the GEMM's root instead.
+
+    The roots are returned in program (top-down) order.
 
     Args:
         target: Handle to candidate op(s) (e.g. all linalg ops).
     Return:
-        Handle to the annotated ops that have no annotated consumer.
+        Handle to the fusion roots.
     """
 
     target: ext.Operand[transform.AnyOpType]
@@ -29,6 +39,30 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
     def attach_interface_impls(cls, ctx=None):
         cls.TransformOpInterfaceModel.attach(cls.OPERATION_NAME, context=ctx)
         cls.MemoryEffectsOpInterfaceModel.attach(cls.OPERATION_NAME, context=ctx)
+
+    @staticmethod
+    def _is_fusion_root(target_op: ir.Operation) -> bool:
+        annotated_consumers = [
+            user
+            for result in target_op.opview.results
+            for user in tsa.op_users(result)
+            if tsa.get_tile_sizes_attr(user) is not None
+        ]
+        # End of an elementwise chain: no annotated elementwise consumer.
+        if any(not tsa.is_gemm(user) for user in annotated_consumers):
+            return False
+        # A GEMM with no elementwise epilogue is its own root.
+        if tsa.is_gemm(target_op):
+            return True
+        # An epilogue op (downstream of a GEMM) is the group's terminal root.
+        if tsa.has_gemm_ancestor(target_op):
+            return True
+        # A pure prologue op feeding a GEMM (e.g. a fill) is fused as a producer
+        # of the GEMM's root, not on its own.
+        if annotated_consumers:
+            return False
+        # A terminal op of a GEMM-free elementwise group.
+        return True
 
     class TransformOpInterfaceModel(transform.TransformOpInterface):
         @staticmethod
@@ -44,12 +78,7 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
             for target_op in target_ops:
                 if tsa.get_tile_sizes_attr(target_op) is None:
                     continue
-                has_annotated_consumer = any(
-                    tsa.get_tile_sizes_attr(user) is not None
-                    for result in target_op.opview.results
-                    for user in tsa.op_users(result)
-                )
-                if not has_annotated_consumer:
+                if GetFusionRootsOp._is_fusion_root(target_op):
                     roots.append(target_op)
 
             results.set_ops(op.roots, roots)
@@ -76,6 +105,6 @@ def get_fusion_roots(
     Args:
         target: Handle to candidate op(s).
     Returns:
-        Handle to annotated ops with no annotated consumer.
+        Handle to the fusion roots (one per fusable group, in program order).
     """
     return GetFusionRootsOp(target=target).roots
