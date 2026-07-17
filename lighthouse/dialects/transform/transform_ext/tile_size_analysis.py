@@ -10,7 +10,7 @@ These utilities operate on linalg ops and are used to implement a generic
 Tile sizes are stored on payload ops as a discardable attribute.
 """
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from mlir import ir
 from mlir.dialects import linalg
@@ -31,7 +31,7 @@ def _opview(op: ir.Operation | ir.OpView) -> ir.OpView:
     return op.opview if isinstance(op, ir.Operation) else op
 
 
-def _dim_position(expr: ir.AffineExpr) -> Optional[int]:
+def _dim_position(expr: ir.AffineExpr) -> int | None:
     """Return the dimension position of a plain dimension expression.
 
     Returns None for non-dimension expressions (constants, composite exprs).
@@ -41,7 +41,7 @@ def _dim_position(expr: ir.AffineExpr) -> Optional[int]:
     return None
 
 
-def indexing_maps(op: ir.Operation | ir.OpView) -> Optional[list[ir.AffineMap]]:
+def indexing_maps(op: ir.Operation | ir.OpView) -> list[ir.AffineMap] | None:
     """Return the indexing maps of a structured linalg op as ``AffineMap``s.
 
     The returned list follows the operand order: inputs first, then outputs.
@@ -109,7 +109,7 @@ def compute_anchor_tile_sizes(
     op: ir.Operation | ir.OpView,
     tile_size: int = DEFAULT_TILE_SIZE,
     parallel_tile_dims: int = DEFAULT_PARALLEL_TILE_DIMS,
-) -> Optional[list[int]]:
+) -> list[int] | None:
     """Compute target tile sizes for an anchor op over its iteration space.
 
     The innermost `parallel_tile_dims` parallel (output) dimensions are tiled
@@ -150,7 +150,7 @@ def compute_anchor_tile_sizes(
     return sizes
 
 
-def get_tile_sizes_attr(op: ir.Operation | ir.OpView) -> Optional[list[int]]:
+def get_tile_sizes_attr(op: ir.Operation | ir.OpView) -> list[int] | None:
     """Return the tile sizes annotated on an op, or None if not annotated."""
     attr = _opview(op).operation.attributes
     if TILE_SIZES_ATTR_NAME not in attr:
@@ -196,7 +196,7 @@ def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
 
 def _map_for_value(
     op: ir.OpView, value: ir.Value, maps: Sequence[ir.AffineMap]
-) -> Optional[ir.AffineMap]:
+) -> ir.AffineMap | None:
     """Return the indexing map associated with `value` on `op`.
 
     `value` may be an input/output operand or a result of `op`.
@@ -221,7 +221,7 @@ def propagate_through_value(
     src_sizes: Sequence[int],
     shared: ir.Value,
     dst_op: ir.Operation | ir.OpView,
-) -> Optional[list[int]]:
+) -> list[int] | None:
     """Propagate tile sizes from `src_op` to `dst_op` via a shared tensor.
 
     The shared tensor `shared` is produced/consumed by both ops. Its
@@ -330,7 +330,7 @@ def op_users(value: ir.Value) -> list[ir.Operation]:
     return users
 
 
-def defining_op(value: ir.Value) -> Optional[ir.Operation]:
+def defining_op(value: ir.Value) -> ir.Operation | None:
     """Return the op defining `value`, or None for block arguments."""
     owner = value.owner
     if isinstance(owner, ir.OpView):

@@ -1,5 +1,3 @@
-from typing import Optional
-
 from mlir import ir
 from mlir.dialects import ext, transform
 from mlir.dialects.transform import DiagnosedSilenceableFailure
@@ -40,7 +38,7 @@ class AssignTileSizesOp(TransformExtensionDialect.Operation, name="assign_tile_s
     """
 
     target: ext.Operand[transform.AnyOpType]
-    tile_size: Optional[ext.Operand[transform.AnyParamType]] = None
+    tile_size: ext.Operand[transform.AnyParamType] | None = None
     annotated: ext.Result[transform.AnyOpType[()]] = ext.infer_result()
 
     @classmethod
