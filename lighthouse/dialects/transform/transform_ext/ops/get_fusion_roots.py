@@ -48,20 +48,20 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
             for user in tsa.op_users(result)
             if tsa.get_tile_sizes_attr(user) is not None
         ]
-        # End of an elementwise chain: no annotated elementwise consumer.
-        if any(not tsa.is_gemm(user) for user in annotated_consumers):
+        # End of an elementwise chain: no annotated non-barrier consumer.
+        if any(not tsa.is_fusion_barrier(user) for user in annotated_consumers):
             return False
-        # A GEMM with no elementwise epilogue is its own root.
-        if tsa.is_gemm(target_op):
+        # A fusion barrier (e.g. a GEMM) with no elementwise epilogue is its own root.
+        if tsa.is_fusion_barrier(target_op):
             return True
-        # An epilogue op (downstream of a GEMM) is the group's terminal root.
-        if tsa.has_gemm_ancestor(target_op):
+        # An epilogue op (downstream of a barrier) is the group's terminal root.
+        if tsa.has_barrier_ancestor(target_op):
             return True
-        # A pure prologue op feeding a GEMM (e.g. a fill) is fused as a producer
-        # of the GEMM's root, not on its own.
+        # A pure prologue op feeding a barrier (e.g. a fill) is fused as a
+        # producer of the barrier's root, not on its own.
         if annotated_consumers:
             return False
-        # A terminal op of a GEMM-free elementwise group.
+        # A terminal op of a barrier-free elementwise group.
         return True
 
     class TransformOpInterfaceModel(transform.TransformOpInterface):

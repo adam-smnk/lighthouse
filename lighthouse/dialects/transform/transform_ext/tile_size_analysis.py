@@ -1,17 +1,13 @@
 """Shared analysis helpers for tile-size selection and propagation.
 
-These utilities operate on payload linalg ops and are used by the
-`assign_tile_sizes`, `propagate_tile_sizes` and `get_tile_sizes` transform ops
-to implement a generic "tile and fuse" strategy:
+These utilities operate on linalg ops and are used to implement a generic
+"tile and fuse" strategy:
 
     1. assign target tile sizes for key anchor ops (e.g. matmuls)
     2. propagate the tile sizes to neighbouring elementwise ops
     3. tile and fuse using the assigned sizes (sizes also act as fusion hints)
 
-Tile sizes are stored on payload ops as a discardable
-`transform_ext.tile_sizes` array attribute holding one entry per iteration
-(loop) dimension of the op, in loop order. A size of zero means "do not tile
-this dimension" (e.g. reduction dimensions).
+Tile sizes are stored on payload ops as a discardable attribute.
 """
 
 from typing import Optional, Sequence
@@ -19,8 +15,8 @@ from typing import Optional, Sequence
 from mlir import ir
 from mlir.dialects import linalg
 
-# Discardable attribute used to annotate payload ops with their target tile
-# sizes (one entry per iteration dimension, in loop order).
+# Attribute used to annotate payload ops with their target tile sizes
+# (one entry per iteration dimension, in loop order).
 TILE_SIZES_ATTR_NAME = "transform_ext.tile_sizes"
 
 # Default size used for tiled dimensions when no hint is provided.
@@ -31,7 +27,7 @@ DEFAULT_TILE_SIZE = 32
 DEFAULT_PARALLEL_TILE_DIMS = 2
 
 
-def _opview(op: "ir.Operation | ir.OpView") -> ir.OpView:
+def _opview(op: ir.Operation | ir.OpView) -> ir.OpView:
     return op.opview if isinstance(op, ir.Operation) else op
 
 
@@ -45,7 +41,7 @@ def _dim_position(expr: ir.AffineExpr) -> Optional[int]:
     return None
 
 
-def indexing_maps(op: "ir.Operation | ir.OpView") -> Optional[list[ir.AffineMap]]:
+def indexing_maps(op: ir.Operation | ir.OpView) -> Optional[list[ir.AffineMap]]:
     """Return the indexing maps of a structured linalg op as ``AffineMap``s.
 
     The returned list follows the operand order: inputs first, then outputs.
@@ -64,29 +60,17 @@ def indexing_maps(op: "ir.Operation | ir.OpView") -> Optional[list[ir.AffineMap]
     return maps
 
 
-def contraction_dims(op: "ir.Operation | ir.OpView"):
-    """Return contraction dimensions for genuine GEMM-like ops, else None.
-
-    `linalg.infer_contraction_dimensions` only inspects indexing maps and may
-    classify reduction-free elementwise ops (e.g. a broadcasted bias add) as
-    contractions. A genuine GEMM has at least one reduction (K) dimension and a
-    parallel (M or N) dimension, so we require both here.
-    """
+def contraction_dims(
+    op: ir.Operation | ir.OpView,
+) -> linalg.ContractionDimensions | None:
+    """Return inferred contraction dimensions."""
+    ov = _opview(op)
     try:
-        cd = linalg.infer_contraction_dimensions(_opview(op))
+        if not linalg.isa_contraction_op(ov):
+            return None
+        return linalg.infer_contraction_dimensions(ov)
     except (TypeError, ValueError):
         return None
-    if cd is None:
-        return None
-    if len(cd.k) == 0 or (len(cd.m) == 0 and len(cd.n) == 0):
-        return None
-    return cd
-
-
-def _single_output_map(maps: Sequence[ir.AffineMap], op: ir.OpView) -> ir.AffineMap:
-    """Return the indexing map of the op's single output operand."""
-    num_outputs = len(list(op.outputs))
-    return maps[len(maps) - num_outputs]
 
 
 def _output_tensor_dim_of_iter_dim(out_map: ir.AffineMap) -> dict[int, int]:
@@ -122,23 +106,21 @@ def _disable_small_tiles(
 
 
 def compute_anchor_tile_sizes(
-    op: "ir.Operation | ir.OpView",
+    op: ir.Operation | ir.OpView,
     tile_size: int = DEFAULT_TILE_SIZE,
     parallel_tile_dims: int = DEFAULT_PARALLEL_TILE_DIMS,
 ) -> Optional[list[int]]:
     """Compute target tile sizes for an anchor op over its iteration space.
 
-    The strategy aims for 2D tiles over the innermost parallel dimensions:
-      * GEMM-like ops: batch dims -> 1, the two contraction parallel dims
-        (M, N) -> tile_size, reduction dims (K) -> 0.
-      * Other structured ops: the innermost `parallel_tile_dims` output
-        (parallel) dims -> tile_size, remaining parallel dims -> 1, and
-        reduction dims (not present in the output map) -> 0.
+    The innermost `parallel_tile_dims` parallel (output) dimensions are tiled
+    with `tile_size`; any remaining parallel dimensions (e.g. batch dims or the
+    outer M/N dims of a high-dimensional contraction) are tiled with a unit
+    size; and reduction dimensions are left untiled.
 
-    Statically small parallel dimensions are left untiled.
+    Statically sized small parallel dimensions are left untiled.
 
     Returns one size per iteration dimension (loop order), or None if the op
-    is not a supported structured op.
+    is not supported.
     """
     ov = _opview(op)
     maps = indexing_maps(ov)
@@ -148,39 +130,27 @@ def compute_anchor_tile_sizes(
     if len(list(ov.outputs)) != 1:
         return None
 
-    out_map = _single_output_map(maps, ov)
-    num_loops = out_map.n_dims
-    sizes = [0] * num_loops
+    # The output operand's map is the last one (inputs first, then outputs).
+    out_map = maps[-1]
+    sizes = [0] * out_map.n_dims
 
-    contraction = contraction_dims(ov)
-    if contraction is not None:
-        # GEMM-like: keep batch sequential, tile the M/N parallel dims, leave
-        # the reduction (K) dims untiled so they remain inside the tile.
-        for d in contraction.batch:
-            sizes[d] = 1
-        for d in list(contraction.m) + list(contraction.n):
-            sizes[d] = tile_size
-    else:
-        # Generic case: tile the innermost parallel (output) dims.
-        parallel_dims = [
-            pos
-            for pos in (_dim_position(e) for e in out_map.results)
-            if pos is not None
-        ]
-        if not parallel_dims:
-            return None
-        inner = parallel_dims[-parallel_tile_dims:]
-        outer = parallel_dims[:-parallel_tile_dims]
-        for d in outer:
-            sizes[d] = 1
-        for d in inner:
-            sizes[d] = tile_size
+    # Tile the innermost parallel dims with the full tile size and
+    # any outer parallel dims (batch, outer M/N) with a unit size.
+    parallel_dims = [
+        pos for pos in (_dim_position(e) for e in out_map.results) if pos is not None
+    ]
+    if not parallel_dims:
+        return None
+    for d in parallel_dims[:-parallel_tile_dims]:
+        sizes[d] = 1
+    for d in parallel_dims[-parallel_tile_dims:]:
+        sizes[d] = tile_size
 
     _disable_small_tiles(ov, out_map, sizes, tile_size)
     return sizes
 
 
-def get_tile_sizes_attr(op: "ir.Operation | ir.OpView") -> Optional[list[int]]:
+def get_tile_sizes_attr(op: ir.Operation | ir.OpView) -> Optional[list[int]]:
     """Return the tile sizes annotated on an op, or None if not annotated."""
     attr = _opview(op).operation.attributes
     if TILE_SIZES_ATTR_NAME not in attr:
@@ -188,20 +158,24 @@ def get_tile_sizes_attr(op: "ir.Operation | ir.OpView") -> Optional[list[int]]:
     return list(ir.DenseI64ArrayAttr(attr[TILE_SIZES_ATTR_NAME]))
 
 
-def set_tile_sizes_attr(op: "ir.Operation | ir.OpView", sizes: Sequence[int]) -> None:
+def set_tile_sizes_attr(op: ir.Operation | ir.OpView, sizes: Sequence[int]) -> None:
     """Annotate an op with its target tile sizes."""
     operation = _opview(op).operation
     operation.attributes[TILE_SIZES_ATTR_NAME] = ir.DenseI64ArrayAttr.get(list(sizes))
 
 
-def is_propagatable(op: "ir.Operation | ir.OpView") -> bool:
+def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
     """Whether tile sizes may be propagated onto this op.
 
-    Anchor ops (contractions) get their sizes from `compute_anchor_tile_sizes`;
-    propagation targets the surrounding elementwise / fill ops that can share a
+    Anchor ops (contractions) define tile sizes;
+    propagation targets the surrounding elementwise / fill ops that can share
     tiling and be fused.
     """
     ov = _opview(op)
+    # Non-contraction generics can be propagated onto.
+    if isinstance(ov, linalg.GenericOp):
+        return not linalg.isa_contraction_op(ov)
+    # Other compatible ops.
     propagatable_ops = (
         linalg.ElementwiseOp,
         linalg.AddOp,
@@ -212,16 +186,12 @@ def is_propagatable(op: "ir.Operation | ir.OpView") -> bool:
         linalg.MaxOp,
         linalg.MinOp,
         linalg.FillOp,
-        linalg.GenericOp,
         linalg.CopyOp,
         linalg.BroadcastOp,
         linalg.TransposeOp,
         linalg.ReduceOp,
     )
-    if not isinstance(ov, propagatable_ops):
-        return False
-    # Never re-tile a contraction through propagation.
-    return contraction_dims(ov) is None
+    return isinstance(ov, propagatable_ops)
 
 
 def _map_for_value(
@@ -247,10 +217,10 @@ def _map_for_value(
 
 
 def propagate_through_value(
-    src_op: "ir.Operation | ir.OpView",
+    src_op: ir.Operation | ir.OpView,
     src_sizes: Sequence[int],
     shared: ir.Value,
-    dst_op: "ir.Operation | ir.OpView",
+    dst_op: ir.Operation | ir.OpView,
 ) -> Optional[list[int]]:
     """Propagate tile sizes from `src_op` to `dst_op` via a shared tensor.
 
@@ -285,7 +255,7 @@ def propagate_through_value(
 
     if len(list(dst.outputs)) != 1:
         return None
-    dst_out_map = _single_output_map(dst_maps, dst)
+    dst_out_map = dst_maps[-1]
     dst_parallel = {
         pos
         for pos in (_dim_position(e) for e in dst_out_map.results)
@@ -303,22 +273,33 @@ def propagate_through_value(
     return dst_sizes
 
 
-def is_gemm(op: "ir.Operation | ir.OpView") -> bool:
-    """Whether the op is a genuine GEMM-like contraction (fusion barrier)."""
-    return contraction_dims(op) is not None
+def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
+    """Whether the op acts as a fusion barrier.
+
+    Fusion groups are not fused across a barrier. The barriers are:
+      * Contractions: on average it is more profitable to keep distinct
+        contractions in separate fused loops with its elementwise prologue
+        and epilogue than to fuse multiple contractions together.
+      * pack / unpack ops: layout changes that stay as materialization
+        boundaries; they are neither propagation anchors nor fused into a group.
+    """
+    ov = _opview(op)
+    if isinstance(ov, (linalg.PackOp, linalg.UnPackOp)):
+        return True
+    return linalg.isa_contraction_op(ov)
 
 
-def has_gemm_ancestor(op: "ir.Operation | ir.OpView") -> bool:
-    """Whether a GEMM is reachable going backward through annotated producers.
+def has_barrier_ancestor(op: ir.Operation | ir.OpView) -> bool:
+    """Whether a fusion barrier is reachable backward through annotated producers.
 
-    Used to tell an epilogue op (downstream of a GEMM, e.g. a bias/relu after a
-    matmul) apart from a pure prologue op (upstream of a GEMM, e.g. a fill).
-    Only annotated ops are traversed; the GEMM itself is a barrier.
+    Used to tell an epilogue op (consumer of a barrier, e.g. a bias/relu after
+    a matmul) apart from a pure prologue op (producer of a barrier, e.g. a fill).
+    Only annotated ops are traversed; the barrier itself is not crossed.
     """
     visited: set = set()
     stack: list = []
 
-    def push_producers(cur: "ir.Operation | ir.OpView") -> None:
+    def push_producers(cur: ir.Operation | ir.OpView) -> None:
         for operand in _opview(cur).operands:
             producer = defining_op(operand)
             if producer is not None and get_tile_sizes_attr(producer) is not None:
@@ -331,7 +312,7 @@ def has_gemm_ancestor(op: "ir.Operation | ir.OpView") -> bool:
         if key in visited:
             continue
         visited.add(key)
-        if is_gemm(cur):
+        if is_fusion_barrier(cur):
             return True
         push_producers(cur)
     return False

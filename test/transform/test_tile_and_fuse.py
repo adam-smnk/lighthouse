@@ -183,6 +183,114 @@ module {
 }
 """
 
+# A matmul + relu with dynamic (?) M and N dimensions. Tiling uses the runtime
+# extents (tensor.dim) for the loop bounds and clamps boundary tiles.
+DYN = """
+#map = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<?x64xf32>, %w: tensor<64x?xf32>, %init: tensor<?x?xf32>) -> tensor<?x?xf32> {
+    %cst = arith.constant 0.0 : f32
+    %f = linalg.fill ins(%cst: f32) outs(%init: tensor<?x?xf32>) -> tensor<?x?xf32>
+    %mm = linalg.matmul ins(%a, %w: tensor<?x64xf32>, tensor<64x?xf32>) outs(%f: tensor<?x?xf32>) -> tensor<?x?xf32>
+    %relu = linalg.generic {indexing_maps=[#map,#map], iterator_types=["parallel","parallel"]} ins(%mm: tensor<?x?xf32>) outs(%init: tensor<?x?xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<?x?xf32>
+    return %relu : tensor<?x?xf32>
+  }
+}
+"""
+
+# A high-dimensional linalg.contract: C[b, m0, m1, n] = sum_k A[b, m0, m1, k] *
+# B[b, k, n]. It has a batch dim, two M dims and one N dim, plus a reduction.
+HIGH_DIM_CONTRACT = """
+#mapA = affine_map<(b, m0, m1, n, k) -> (b, m0, m1, k)>
+#mapB = affine_map<(b, m0, m1, n, k) -> (b, k, n)>
+#mapC = affine_map<(b, m0, m1, n, k) -> (b, m0, m1, n)>
+module {
+  func.func @main(%a: tensor<2x4x64x64xf32>, %b: tensor<2x64x64xf32>) -> tensor<2x4x64x64xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<2x4x64x64xf32>
+    %f = linalg.fill ins(%cst: f32) outs(%e: tensor<2x4x64x64xf32>) -> tensor<2x4x64x64xf32>
+    %c = linalg.contract indexing_maps = [#mapA, #mapB, #mapC] ins(%a, %b : tensor<2x4x64x64xf32>, tensor<2x64x64xf32>) outs(%f : tensor<2x4x64x64xf32>) -> tensor<2x4x64x64xf32>
+    return %c : tensor<2x4x64x64xf32>
+  }
+}
+"""
+
+# A matvec (C[m] = A[m, k] * B[k]) with a relu epilogue: a GEMM whose result is
+# 1D. Its single parallel (M) dim must still be tiled under the default
+# DEFAULT_PARALLEL_TILE_DIMS (2).
+MATVEC = """
+#map = affine_map<(d0) -> (d0)>
+module {
+  func.func @main(%m: tensor<128x64xf32>, %v: tensor<64xf32>) -> tensor<128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<128xf32>
+    %f = linalg.fill ins(%cst: f32) outs(%e: tensor<128xf32>) -> tensor<128xf32>
+    %mv = linalg.matvec ins(%m, %v: tensor<128x64xf32>, tensor<64xf32>) outs(%f: tensor<128xf32>) -> tensor<128xf32>
+    %relu = linalg.generic {indexing_maps=[#map,#map], iterator_types=["parallel"]} ins(%mv: tensor<128xf32>) outs(%e: tensor<128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<128xf32>
+    return %relu : tensor<128xf32>
+  }
+}
+"""
+
+# A batch matmul feeding a transposing consumer. The batch matmul is tiled
+# [1, 32, 32, 0] (batch -> 1, M/N -> 32); the consumer reads the result with a
+# permuted map (D[m, b, n] = C[b, m, n]), so tile-size propagation must remap the
+# per-dimension tiles through the transpose: the batch unit tile has to land on
+# the consumer's transposed batch dim, giving [32, 1, 32] (not a positional copy
+# [1, 32, 32]).
+PERMUTED = """
+#cin = affine_map<(d0, d1, d2) -> (d1, d0, d2)>
+#cout = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
+module {
+  func.func @main(%a: tensor<2x64x96xf32>, %b: tensor<2x96x128xf32>) -> tensor<64x2x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<2x64x128xf32>
+    %f = linalg.fill ins(%cst: f32) outs(%e: tensor<2x64x128xf32>) -> tensor<2x64x128xf32>
+    %mm = linalg.batch_matmul ins(%a, %b : tensor<2x64x96xf32>, tensor<2x96x128xf32>) outs(%f : tensor<2x64x128xf32>) -> tensor<2x64x128xf32>
+    %eo = tensor.empty() : tensor<64x2x128xf32>
+    %t = linalg.generic {indexing_maps=[#cin, #cout], iterator_types=["parallel","parallel","parallel"]} ins(%mm : tensor<2x64x128xf32>) outs(%eo : tensor<64x2x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      linalg.yield %i : f32
+    } -> tensor<64x2x128xf32>
+    return %t : tensor<64x2x128xf32>
+  }
+}
+"""
+
+# A pack -> elementwise -> unpack chain. pack / unpack are fusion barriers: they
+# stay as materialization boundaries (outside the tiled loop) while the
+# elementwise op in between is tiled and fused on its own.
+PACK_UNPACK = """
+#id4 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+module {
+  func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %d = tensor.empty() : tensor<4x4x32x32xf32>
+    %packed = linalg.pack %a inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %d : tensor<128x128xf32> -> tensor<4x4x32x32xf32>
+    %e2 = tensor.empty() : tensor<4x4x32x32xf32>
+    %r = linalg.generic {indexing_maps=[#id4, #id4], iterator_types=["parallel","parallel","parallel","parallel"]} ins(%packed: tensor<4x4x32x32xf32>) outs(%e2: tensor<4x4x32x32xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<4x4x32x32xf32>
+    %out = tensor.empty() : tensor<128x128xf32>
+    %u = linalg.unpack %r inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %out : tensor<4x4x32x32xf32> -> tensor<128x128xf32>
+    return %u : tensor<128x128xf32>
+  }
+}
+"""
+
 
 # A GEMM anchors tiling; its tile sizes are propagated to the fill producer and
 # the elementwise (bias, relu) consumers, then the whole group is fused.
@@ -276,3 +384,65 @@ run("two_consecutive_gemms_fuse", TWO_GEMM, assign_gemm, tile_and_fuse)
 # CHECK: linalg.generic
 # CHECK: scf.forall.in_parallel
 run("mlp_three_layers", MLP3, assign_gemm, tile_and_fuse)
+
+
+# Dynamic shapes: the matmul + relu group is tiled and fused into a single
+# scf.forall whose bounds come from the runtime extents (tensor.dim).
+# CHECK-LABEL: Test: dynamic_tile_and_fuse
+# CHECK: %[[D0:.+]] = tensor.dim
+# CHECK: %[[D1:.+]] = tensor.dim
+# CHECK: scf.forall ({{.*}}) = (0, 0) to (%[[D0]], %[[D1]]) step (32, 32)
+# CHECK: linalg.fill
+# CHECK: linalg.matmul
+# CHECK: linalg.generic
+# CHECK: scf.forall.in_parallel
+run("dynamic_tile_and_fuse", DYN, assign_gemm, tile_and_fuse)
+
+
+# High-dimensional contraction: only the innermost two parallel (M, N) output
+# dims are tiled with the tile size; the outer parallel dims (batch and the
+# outer M dim) get a unit tile and the reduction (K) dim is left untiled, just
+# like GetTilingSizesOp.contract_tiles.
+# CHECK-LABEL: Test: high_dim_contract
+# CHECK: linalg.contract
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 1, 1, 32, 32, 0>
+run("high_dim_contract", HIGH_DIM_CONTRACT, assign_gemm)
+
+
+# 1D results: the matvec's single parallel (M) dim is tiled with the full tile
+# size (its reduction K stays untiled) under the default DEFAULT_PARALLEL_TILE_DIMS,
+# and the group fuses into a single 1D scf.forall.
+# CHECK-LABEL: Test: matvec_1d_tile_and_fuse
+# CHECK: scf.forall ({{.*}}) = (0) to (128) step (32)
+# CHECK: linalg.fill
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32>
+# CHECK: linalg.matvec
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 0>
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32>
+# CHECK: scf.forall.in_parallel
+run("matvec_1d_tile_and_fuse", MATVEC, assign_gemm, tile_and_fuse)
+
+
+# Propagation across a permuted (transposed) shared tensor: the batch matmul is
+# tiled [1, 32, 32, 0] and the consumer, which reads the result transposed, must
+# receive the per-dimension tiles remapped through its indexing map -> the batch
+# unit tile lands on the consumer's transposed batch dim, giving [32, 1, 32].
+# CHECK-LABEL: Test: permuted_propagation
+# CHECK: linalg.batch_matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 1, 32, 32, 0>
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 1, 32>
+run("permuted_propagation", PERMUTED, assign_gemm)
+
+
+# pack / unpack are fusion barriers: they are not propagation anchors and are not
+# fused into the tiled loop. The elementwise op between them is tiled on its own,
+# with the pack left before and the unpack after the resulting scf.forall.
+# CHECK-LABEL: Test: pack_unpack_barrier
+# CHECK: linalg.pack
+# CHECK: scf.forall
+# CHECK: linalg.generic
+# CHECK: scf.forall.in_parallel
+# CHECK: linalg.unpack
+run("pack_unpack_barrier", PACK_UNPACK, assign_elementwise, tile_and_fuse)
