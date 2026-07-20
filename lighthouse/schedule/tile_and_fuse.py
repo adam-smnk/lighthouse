@@ -38,16 +38,17 @@ GEMM_OPS = [
 ]
 
 
-def assign_tile_sizes(
+def assign_and_propagate_tile_sizes(
     anchor_op: str | list[str] | None = None,
     tile_size: int = 32,
 ) -> ir.Module:
     """
-    Assign and propagate target tile sizes (steps 1 and 2).
+    Assign tile sizes to anchor ops and propagate them (steps 1 and 2).
 
     Anchor ops matched by `anchor_op` are annotated with target tile sizes,
     which are then propagated to neighbouring elementwise / fill ops so that a
-    fusable group shares a consistent tiling.
+    fusable group shares a consistent tiling. Selecting the anchors is the
+    caller's decision (via the `anchor_op` match).
 
     This can be applied multiple times with different anchors (e.g. GEMMs first,
     then leftover elementwise ops). Ops that are already annotated keep their
@@ -72,18 +73,28 @@ def assign_tile_sizes(
 
 def assign_elementwise_tile_sizes(tile_size: int = 32) -> ir.Module:
     """
-    Anchor tiling on elementwise ops (step 1 and 2 fallback).
+    Anchor tiling on elementwise ops only (step 1 and 2 fallback).
 
-    Intended for kernels without a GEMM: an elementwise op's tile size is chosen
-    and propagated to its neighbours so they can be fused. Ops already annotated
-    (e.g. by a preceding GEMM assignment) are left untouched.
+    Intended for kernels without a GEMM. All linalg ops are matched and then
+    filtered down to the genuinely elementwise ones (`filter_elementwise`);
+    those anchors are annotated and their sizes propagated to neighbours so they
+    can be fused. Ops already annotated (e.g. by a preceding GEMM assignment) are
+    left untouched.
 
     Args:
         tile_size: Size used for tiled dimensions. User hint, default 32.
     Returns:
         Schedule module.
     """
-    return assign_tile_sizes(anchor_op="linalg.generic", tile_size=tile_size)
+    with schedule_boilerplate() as (sched, named_seq):
+        candidates = lh_transform.match_op(
+            named_seq.bodyTarget, structured.MatchInterfaceEnum.LinalgOp
+        )
+        elementwise = transform_ext.filter_elementwise(candidates)
+        annotated = transform_ext.assign_tile_sizes(elementwise, tile_size=tile_size)
+        transform_ext.propagate_tile_sizes(annotated)
+        transform.yield_()
+    return sched
 
 
 def tile_and_fuse_annotated(

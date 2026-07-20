@@ -69,7 +69,7 @@ class AssignTileSizesOp(TransformExtensionDialect.Operation, name="assign_tile_s
                 if tsa.get_tile_sizes_attr(target_op) is not None:
                     annotated.append(target_op)
                     continue
-                sizes = tsa.compute_anchor_tile_sizes(target_op, tile_size=tile_size)
+                sizes = tsa.compute_tile_sizes(target_op, tile_size=tile_size)
                 if sizes is None:
                     continue
                 tsa.set_tile_sizes_attr(target_op, sizes)
@@ -107,4 +107,7 @@ def assign_tile_sizes(
         param_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(64), tile_size)
         tile_size = transform.ParamConstantOp(transform.AnyParamType.get(), param_attr)
 
-    return AssignTileSizesOp(target=target, tile_size=tile_size).annotated
+    return AssignTileSizesOp(
+        target=target,
+        tile_size=tile_size,
+    ).annotated

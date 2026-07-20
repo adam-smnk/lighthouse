@@ -30,7 +30,7 @@ def run(name: str, payload_str: str, *schedules):
 
 
 def assign_gemm():
-    return tf.assign_tile_sizes(tile_size=32)
+    return tf.assign_and_propagate_tile_sizes(tile_size=32)
 
 
 def assign_elementwise():
@@ -100,15 +100,42 @@ module {
 }
 """
 
+# A named elementwise op (linalg.add) followed by a relu generic. The
+# elementwise anchor schedule must cover named variants, not just linalg.generic.
+NAMED_ELTWISE = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<64x256xf32>, %b: tensor<64x256xf32>) -> tensor<64x256xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<64x256xf32>
+    %add = linalg.add ins(%a, %b: tensor<64x256xf32>, tensor<64x256xf32>) outs(%e: tensor<64x256xf32>) -> tensor<64x256xf32>
+    %relu = linalg.generic {indexing_maps=[#id, #id], iterator_types=["parallel","parallel"]} ins(%add: tensor<64x256xf32>) outs(%e: tensor<64x256xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<64x256xf32>
+    return %relu : tensor<64x256xf32>
+  }
+}
+"""
+
 REDUCE = """
-#in = affine_map<(d0, d1) -> (d0, d1)>
+#id = affine_map<(d0, d1) -> (d0, d1)>
 #out = affine_map<(d0, d1) -> (d0)>
 module {
   func.func @main(%a: tensor<64x256xf32>) -> tensor<64xf32> {
     %cst = arith.constant 0.0 : f32
+    %ein = tensor.empty() : tensor<64x256xf32>
+    %relu = linalg.generic {indexing_maps=[#id, #id], iterator_types=["parallel","parallel"]} ins(%a: tensor<64x256xf32>) outs(%ein: tensor<64x256xf32>) {
+    ^bb0(%in: f32, %o: f32):
+      %c = arith.cmpf ugt, %in, %cst : f32
+      %s = arith.select %c, %in, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<64x256xf32>
     %e = tensor.empty() : tensor<64xf32>
     %f = linalg.fill ins(%cst: f32) outs(%e: tensor<64xf32>) -> tensor<64xf32>
-    %r = linalg.generic {indexing_maps=[#in,#out], iterator_types=["parallel","reduction"]} ins(%a: tensor<64x256xf32>) outs(%f: tensor<64xf32>) {
+    %r = linalg.generic {indexing_maps=[#id, #out], iterator_types=["parallel","reduction"]} ins(%relu: tensor<64x256xf32>) outs(%f: tensor<64xf32>) {
     ^bb0(%in: f32, %o: f32):
       %s = arith.addf %in, %o : f32
       linalg.yield %s : f32
@@ -332,11 +359,22 @@ run("elementwise_tile_and_fuse", ELTWISE, assign_elementwise, tile_and_fuse)
 run("batch_matmul", BMM, assign_gemm)
 
 
-# Reduction: the parallel dim is tiled, the reduction dim is left untiled (0).
+# Reduction: an elementwise op anchors the group and propagation reaches the
+# reduction consumer, tiling its parallel dim and leaving the reduction dim
+# untiled (0). A standalone reduction is not an elementwise anchor.
 # CHECK-LABEL: Test: reduction
-# CHECK: linalg.generic
+# CHECK: iterator_types = ["parallel", "reduction"]
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 0>
 run("reduction", REDUCE, assign_elementwise)
+
+
+# The elementwise anchor schedule covers named variants: a linalg.add anchor is
+# annotated and its tiles propagate to the relu generic epilogue.
+# CHECK-LABEL: Test: named_elementwise_anchor
+# CHECK: linalg.add {transform_ext.tile_sizes = array<i64: 32, 32>}
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("named_elementwise_anchor", NAMED_ELTWISE, assign_elementwise)
 
 
 # Two consecutive GEMMs: the shared relu is the epilogue of the first matmul, so

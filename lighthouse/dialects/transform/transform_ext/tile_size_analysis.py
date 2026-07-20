@@ -105,12 +105,15 @@ def _disable_small_tiles(
             sizes[iter_dim] = 0
 
 
-def compute_anchor_tile_sizes(
+def compute_tile_sizes(
     op: ir.Operation | ir.OpView,
     tile_size: int = DEFAULT_TILE_SIZE,
     parallel_tile_dims: int = DEFAULT_PARALLEL_TILE_DIMS,
 ) -> list[int] | None:
-    """Compute target tile sizes for an anchor op over its iteration space.
+    """Compute target tile sizes for an op over its iteration space.
+
+    Selecting which ops to tile (the anchors) is an external decision; this
+    routine only computes sizes for whatever op it is given.
 
     The innermost `parallel_tile_dims` parallel (output) dimensions are tiled
     with `tile_size`; any remaining parallel dimensions (e.g. batch dims or the

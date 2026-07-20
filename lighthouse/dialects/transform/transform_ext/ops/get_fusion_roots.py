@@ -10,12 +10,17 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
     """
     Select the fusion roots among tile-size annotated ops, with GEMM barriers.
 
-    Given a set of candidate ops, return the roots of each fusable group. A
-    group is a GEMM together with its elementwise prologue (producers) and
-    epilogue (consumers); GEMMs act as barriers so that consecutive GEMMs are
-    not fused together. Tiling a returned root and greedily fusing its producers
-    pulls exactly one group into a single tiled loop (when the roots are
-    processed top-down, so an already-fused upstream group blocks fusion).
+    Given a set of candidate ops, return the root of each fusable group. A group
+    is a GEMM together with its elementwise prologue (producers, e.g. a fill) and
+    epilogue (consumers, e.g. a bias-add / relu). GEMMs act as barriers, so
+    consecutive GEMMs are kept in separate groups instead of being fused
+    together.
+
+    The caller tiles each returned root and greedily fuses its producers into the
+    tiled loop, pulling exactly one group into a single loop. This relies on the
+    roots being processed top-down: once an upstream group has been fused it
+    blocks a downstream group from pulling it back in. The roots are therefore
+    returned in program (top-down) order (see `_in_program_order`).
 
     An annotated op is a fusion root when its result does not feed another
     elementwise op of the same group, i.e.:
@@ -24,12 +29,10 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
       * it is not a pure prologue op feeding a GEMM (e.g. a fill): such ops are
         fused as producers of the GEMM's root instead.
 
-    The roots are returned in program (top-down) order.
-
     Args:
         target: Handle to candidate op(s) (e.g. all linalg ops).
     Return:
-        Handle to the fusion roots.
+        Handle to the fusion roots, one per group, in program (top-down) order.
     """
 
     target: ext.Operand[transform.AnyOpType]
@@ -64,6 +67,43 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
         # A terminal op of a barrier-free elementwise group.
         return True
 
+    @staticmethod
+    def _in_program_order(ops: list[ir.Operation]) -> list[ir.Operation]:
+        """Return `ops` sorted top-down by their position in the payload IR.
+
+        The order of `get_payload_ops` is not guaranteed to be program order, so
+        the roots are ordered explicitly. A pre-order walk of the enclosing
+        payload visits ops top-down; only the given `ops` are collected (matched
+        by identity) and the walk stops once all of them have been seen, so other
+        payload ops are ignored.
+
+        Note: this is a workaround for `DominanceInfo` not being exposed in the
+        MLIR Python bindings. Ordering by dominance would be the natural choice;
+        it is only a partial order in general, but that is sufficient here since
+        a fusable group never spans control flow -- all roots share a single
+        block, where dominance and program order coincide. The pre-order walk
+        produces that same order directly.
+        """
+        if not ops:
+            return ops
+        remaining = {o.operation.__hash__(): o for o in ops}
+        top = ops[0]
+        while top.parent is not None:
+            top = top.parent
+
+        ordered: list[ir.Operation] = []
+
+        def collect(visited: ir.Operation) -> ir.WalkResult:
+            found = remaining.pop(visited.operation.__hash__(), None)
+            if found is not None:
+                ordered.append(found)
+                if not remaining:
+                    return ir.WalkResult.INTERRUPT
+            return ir.WalkResult.ADVANCE
+
+        top.walk(collect, ir.WalkOrder.PRE_ORDER)
+        return ordered
+
     class TransformOpInterfaceModel(transform.TransformOpInterface):
         @staticmethod
         def apply(
@@ -80,6 +120,9 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
                     continue
                 if GetFusionRootsOp._is_fusion_root(target_op):
                     roots.append(target_op)
+
+            # Order roots to allow easy use of greedy producer fusion.
+            roots = GetFusionRootsOp._in_program_order(roots)
 
             results.set_ops(op.roots, roots)
             return DiagnosedSilenceableFailure.Success
