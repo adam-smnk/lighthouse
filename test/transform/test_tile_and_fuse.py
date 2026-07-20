@@ -18,7 +18,7 @@ def run(name: str, payload_str: str, *schedules):
     """Parse a payload, apply the given schedules in order and print it."""
     print(f"Test: {name}", flush=True)
     with ir.Context(), ir.Location.unknown():
-        lh_dialects.register_and_load(reload=True)
+        lh_dialects.register_and_load()
         payload = ir.Module.parse(payload_str)
         # Keep schedule modules alive while applying them.
         modules = []

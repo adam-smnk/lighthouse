@@ -26,7 +26,7 @@ def apply_schedule(payload_str, build_roots, name):
     `name` so the resulting order is visible on stdout.
     """
     with ir.Context(), ir.Location.unknown():
-        lh_dialects.register_and_load(reload=True)
+        lh_dialects.register_and_load()
         payload = ir.Module.parse(payload_str)
         with schedule_boilerplate() as (sched, named_seq):
             roots = build_roots(named_seq)
