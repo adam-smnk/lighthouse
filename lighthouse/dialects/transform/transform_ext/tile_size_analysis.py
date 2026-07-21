@@ -170,31 +170,15 @@ def set_tile_sizes_attr(op: ir.Operation | ir.OpView, sizes: Sequence[int]) -> N
 def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
     """Whether tile sizes may be propagated onto this op.
 
-    Anchor ops (contractions) define tile sizes;
-    propagation targets the surrounding elementwise / fill ops that can share
-    tiling and be fused.
+    Anchor ops (fusion barriers) define tile sizes; propagation targets the
+    surrounding structured linalg ops (elementwise / fill / broadcast / reduce
+    ...) that can share their tiling and be fused. Any structured linalg op that
+    is not a fusion barrier is a valid propagation target -- barriers are the
+    heavy compute ops (contractions, convolutions / pooling) that stay as anchors
+    (see `is_fusion_barrier`). Non-linalg ops have no indexing maps to translate
+    tiles through and are excluded.
     """
-    ov = _opview(op)
-    # Non-contraction generics can be propagated onto.
-    if isinstance(ov, linalg.GenericOp):
-        return not linalg.isa_contraction_op(ov)
-    # Other compatible ops.
-    propagatable_ops = (
-        linalg.ElementwiseOp,
-        linalg.AddOp,
-        linalg.SubOp,
-        linalg.MulOp,
-        linalg.DivOp,
-        linalg.ExpOp,
-        linalg.MaxOp,
-        linalg.MinOp,
-        linalg.FillOp,
-        linalg.CopyOp,
-        linalg.BroadcastOp,
-        linalg.TransposeOp,
-        linalg.ReduceOp,
-    )
-    return isinstance(ov, propagatable_ops)
+    return indexing_maps(op) is not None and not is_fusion_barrier(op)
 
 
 def _map_for_value(
@@ -280,16 +264,17 @@ def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
     """Whether the op acts as a fusion barrier.
 
     Fusion groups are not fused across a barrier. The barriers are:
-      * Contractions: on average it is more profitable to keep distinct
-        contractions in separate fused loops with its elementwise prologue
-        and epilogue than to fuse multiple contractions together.
+      * Heavy compute ops -- contractions and convolutions / pooling: on average
+        it is more profitable to keep each in its own fused loop with its
+        elementwise prologue and epilogue than to fuse several together. They
+        also act as tiling anchors rather than propagation targets.
       * pack / unpack ops: layout changes that stay as materialization
         boundaries; they are neither propagation anchors nor fused into a group.
     """
     ov = _opview(op)
     if isinstance(ov, (linalg.PackOp, linalg.UnPackOp)):
         return True
-    return linalg.isa_contraction_op(ov)
+    return linalg.isa_contraction_op(ov) or linalg.isa_convolution_op(ov)
 
 
 def has_barrier_ancestor(op: ir.Operation | ir.OpView) -> bool:

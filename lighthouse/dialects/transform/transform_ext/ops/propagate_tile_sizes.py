@@ -101,6 +101,9 @@ class PropagateTileSizesOp(
                             forward.append(dst)
 
             # Phase 2: backward (prologue) propagation from all annotated ops.
+            # Seeding from every annotated op to reach other epilogue producers.
+            # Propagation still stops at barriers, so it never leaks into upstream
+            # groups.
             backward: list[ir.Operation] = list(annotated)
             idx = 0
             while idx < len(backward):
