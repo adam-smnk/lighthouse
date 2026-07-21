@@ -17,6 +17,7 @@ from .ops.update_address_space import update_address_space
 from .ops.replace_with_fused_attention import replace_with_fused_attention
 from .ops.filter_num_loops import filter_num_loops
 from .ops.filter_elementwise import filter_elementwise
+from .ops.get_leading_unit_tile_sizes import get_leading_unit_tile_sizes
 from .ops.move_offsets_to_subview import move_offsets_to_subview
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "filter_elementwise",
     "filter_num_loops",
     "get_fusion_roots",
+    "get_leading_unit_tile_sizes",
     "get_named_attribute",
     "get_named_attribute",
     "get_tile_sizes",

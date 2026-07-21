@@ -1,65 +1,56 @@
 from mlir import ir
 from mlir.dialects import transform
 from mlir.dialects.transform import structured
-from mlir.dialects.transform import loop
 from mlir.dialects.transform import vector
 from mlir.dialects.transform import tensor
 
 from lighthouse.schedule import schedule_boilerplate
 from lighthouse import transform as lh_transform
+from lighthouse.dialects.transform import transform_ext
 
 
-def lower_packs_for_vectorization(
-    pack_ops, pack_tile_sizes, vector_tile_sizes=None, vector_unroll_factors=[]
-):
+def lower_packs(pack_ops):
     """
-    Lower packs into hardware-friendly operations.
+    Tile and lower pack ops into pad / expand_shape / transpose ops.
+
+    Tiling comes from the tile_size_analysis framework (one inner tile per
+    iteration), so it adapts to arbitrary pack dimensionality. The resulting
+    transposes are vectorized separately.
 
     Args:
-        pack_ops: Handle to pack operations
-        pack_tile_sizes: Pack sub-tiling sizes
-        vector_tile_sizes: Target vector shapes
-        vector_unroll_factors: Unroll factors for each vector loop.
+        pack_ops: Handle to (tile-size annotated) pack operations.
     """
     with lh_transform.foreach(pack_ops) as pack_op:
+        tile_sizes = transform_ext.get_tile_sizes(pack_op)
         tiled_pack = structured.TileUsingForallOp(
-            pack_op, tile_sizes=pack_tile_sizes
+            pack_op, tile_sizes=tile_sizes
         ).tiled_op
-        _, _, transpose = structured.structured_lower_pack(
+        structured.structured_lower_pack(
             transform.OperationType.get("tensor.pad"),
             transform.OperationType.get("tensor.expand_shape"),
             transform.OperationType.get("linalg.transpose"),
             tiled_pack,
             lower_pad_like_with_insert_slice=False,
         )
-        if vector_tile_sizes:
-            _, *loops = structured.TileUsingForOp(
-                transpose, sizes=vector_tile_sizes
-            ).results
-            for idx, factor in enumerate(reversed(vector_unroll_factors)):
-                loop.loop_unroll(loops[-1 - idx], factor)
         transform.yield_()
 
 
-def lower_unpacks_for_vectorization(
-    unpack_ops, unpack_tile_sizes, vector_tile_sizes=None
-):
+def lower_unpacks(unpack_ops):
     """
-    Lower unpacks into hardware-friendly operations.
+    Tile and lower unpack ops into empty / transpose / collapse / copy ops.
+
+    Tiling comes from the tile_size_analysis framework (one inner tile per
+    iteration), so it adapts to arbitrary unpack dimensionality. The resulting
+    transposes / copies are vectorized separately.
 
     Args:
-        unpack_ops: Handle to unpack operations
-        unpack_tile_sizes: Unpack sub-tiling sizes
-        vector_tile_sizes: Target vector shapes
+        unpack_ops: Handle to (tile-size annotated) unpack operations.
     """
     with lh_transform.foreach(unpack_ops) as unpack_op:
+        tile_sizes = transform_ext.get_tile_sizes(unpack_op)
         tiled_unpack = structured.TileUsingForallOp(
-            unpack_op, tile_sizes=unpack_tile_sizes
+            unpack_op, tile_sizes=tile_sizes
         ).tiled_op
-        for size in vector_tile_sizes:
-            tiled_unpack = structured.TileUsingForOp(
-                tiled_unpack, sizes=[size]
-            ).tiled_linalg_op
         structured.structured_lower_unpack(
             transform.OperationType.get("tensor.empty"),
             transform.OperationType.get("linalg.transpose"),
@@ -72,51 +63,53 @@ def lower_unpacks_for_vectorization(
         transform.yield_()
 
 
-def lower_packs_unpacks(tile_size: int, leading_batch_dims: int = 0) -> ir.Module:
+def vectorize_innermost(ops):
     """
-    Lower pack and unpack ops into hardware-friendly shapes.
+    Tile each op's leading dims into unit loops and vectorize the innermost dim.
+
+    Rank-agnostic: `get_leading_unit_tile_sizes` yields N-1 unit sizes for an
+    N-dim op, so the outer dims become loops and the innermost dim is vectorized
+    to a 1-D vector.
 
     Args:
-        tile_size: Target shape for sub-tiling pack and unpack ops' inner tiles
-        leading_batch_dims: Number of leading batch dimensions for extra tiling
+        ops: Handle to structured linalg ops (e.g. transposes / copies).
+    """
+    with lh_transform.foreach(ops) as op:
+        sizes = transform_ext.get_leading_unit_tile_sizes(op)
+        tiled = structured.TileUsingForallOp(op, tile_sizes=sizes).tiled_op
+        structured.structured_vectorize(tiled, [])
+        transform.yield_()
+
+
+def lower_packs_unpacks(tile_size: int = 32, leading_batch_dims: int = 0) -> ir.Module:
+    """
+    Lower pack and unpack ops into hardware-friendly, vectorized shapes.
+
+    Pack / unpack ops are first tiled to a single inner tile per iteration (via
+    the tile_size_analysis framework, adapting to any dimensionality) and lowered
+    to pad / transpose / copy ops, whose leading dims are then tiled into loops
+    and innermost dim vectorized.
+
+    Args:
+        tile_size: Retained for pipeline compatibility; the tiling is derived
+            from each op's pack structure.
+        leading_batch_dims: Retained for pipeline compatibility; batch dims are
+            handled by the per-op tiling.
     Returns:
         Schedule
     """
-    batch_tile_sizes = [1] * leading_batch_dims
     with schedule_boilerplate() as (schedule, named_seq):
-        pack_unpack_vector_m = max(8, tile_size)
-        pack_unpack_vector_n = min(64, tile_size)
         packs = lh_transform.match_op(named_seq.bodyTarget, "linalg.pack")
-        lower_packs_for_vectorization(
-            pack_ops=packs,
-            pack_tile_sizes=batch_tile_sizes + [1, 1],
-            vector_tile_sizes=batch_tile_sizes
-            + [1, 1, pack_unpack_vector_m, pack_unpack_vector_n],
-            vector_unroll_factors=batch_tile_sizes
-            + [tile_size // pack_unpack_vector_n],
-        )
+        lower_packs(transform_ext.assign_tile_sizes(packs))
         lh_transform.cleanup(named_seq.bodyTarget)
 
         unpacks = lh_transform.match_op(named_seq.bodyTarget, "linalg.unpack")
-        lower_unpacks_for_vectorization(
-            unpack_ops=unpacks,
-            unpack_tile_sizes=batch_tile_sizes + [tile_size, tile_size],
-            vector_tile_sizes=batch_tile_sizes + [1],
-        )
+        lower_unpacks(transform_ext.assign_tile_sizes(unpacks))
+
         transposes = lh_transform.match_op(named_seq.bodyTarget, "linalg.transpose")
-        with lh_transform.foreach(transposes) as tranpose:
-            tranpose = structured.TileUsingForOp(
-                tranpose, sizes=batch_tile_sizes + [1, 1, 1]
-            ).tiled_linalg_op
-            structured.structured_vectorize(tranpose, [])
-            transform.yield_()
+        vectorize_innermost(transposes)
         copies = lh_transform.match_op(named_seq.bodyTarget, "linalg.copy")
-        with lh_transform.foreach(copies) as copy:
-            copy = structured.TileUsingForOp(
-                copy, sizes=batch_tile_sizes + [1]
-            ).tiled_linalg_op
-            structured.structured_vectorize(copy, [])
-            transform.yield_()
+        vectorize_innermost(copies)
 
         # Cleanup.
         with ir.InsertionPoint(

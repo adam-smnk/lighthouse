@@ -57,6 +57,14 @@ def indexing_maps(op: ir.Operation | ir.OpView) -> list[ir.AffineMap] | None:
     return maps
 
 
+def num_loops(op: ir.Operation | ir.OpView) -> int | None:
+    """Number of iteration dims (loops) of a structured linalg op, or None."""
+    maps = indexing_maps(op)
+    if not maps:
+        return None
+    return maps[0].n_dims
+
+
 def contraction_dims(
     op: ir.Operation | ir.OpView,
 ) -> linalg.ContractionDimensions | None:
@@ -109,14 +117,31 @@ def compute_tile_sizes(
 ) -> list[int] | None:
     """Compute target tile sizes for an op over its iteration space.
 
-    The innermost `parallel_tile_dims` parallel (output) dims are tiled with
-    `tile_size`, any remaining parallel dims (batch / outer M/N) with a unit size,
-    and reduction dims are left untiled. Statically small parallel dims are also
-    left untiled.
+    For structured ops, the innermost `parallel_tile_dims` parallel (output) dims
+    are tiled with `tile_size`, any remaining parallel dims (batch / outer M/N)
+    with a unit size, and reduction dims are left untiled. Statically small
+    parallel dims are also left untiled.
+
+    pack / unpack ops are tiled to a single inner tile per iteration: a pack tiles
+    every source dim by 1; an unpack tiles its packed output dims (`inner_dims_pos`)
+    by the inner tile size and the rest by 1.
 
     Returns one size per iteration dim (loop order), or None if unsupported.
     """
     ov = _opview(op)
+
+    # pack / unpack have no affine indexing maps; their tiling follows the pack
+    # structure (they are tiled standalone, not fused into a group).
+    if isinstance(ov, linalg.PackOp):
+        return [1] * ir.ShapedType(ov.source.type).rank
+    if isinstance(ov, linalg.UnPackOp):
+        sizes = [1] * ir.ShapedType(ov.result.type).rank
+        inner_dims = ir.DenseI64ArrayAttr(ov.inner_dims_pos)
+        inner_tiles = ir.DenseI64ArrayAttr(ov.static_inner_tiles)
+        for dim, tile in zip(inner_dims, inner_tiles):
+            sizes[dim] = tile
+        return sizes
+
     maps = indexing_maps(ov)
     if maps is None:
         return None
