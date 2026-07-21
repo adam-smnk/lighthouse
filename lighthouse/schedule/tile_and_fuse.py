@@ -1,14 +1,10 @@
 """Generic tile-and-fuse schedules.
 
 These schedules generalise the matmul-specific cache tiling to arbitrary
-KernelBench workloads. They implement the three-step strategy:
-
-    1. assign target tile sizes to anchor ops (GEMMs by default)
-    2. propagate the sizes to neighbouring elementwise ops
-    3. tile and fuse using the assigned sizes (sizes act as fusion hints)
-
-The sizes are recorded as ``transform_ext.tile_sizes`` attributes between the
-steps, so the assignment / propagation policy is decoupled from the tiling.
+workloads: they assign target tile sizes to anchor ops, propagate
+those sizes to neighboring ops, and tile and fuse using the annotations as
+fusion hints. Sizes are recorded as ``transform_ext.tile_sizes`` attributes, so
+the assignment / propagation policy is decoupled from the tiling.
 
 Tiling decisions are dominated by GEMMs: their tiles take precedence and define
 the tiling of elementwise consumers. Kernels without a GEMM fall back to
@@ -43,16 +39,12 @@ def assign_and_propagate_tile_sizes(
     tile_size: int = 32,
 ) -> ir.Module:
     """
-    Assign tile sizes to anchor ops and propagate them (steps 1 and 2).
+    Assign tile sizes to anchor ops and propagate them to their neighbors.
 
-    Anchor ops matched by `anchor_op` are annotated with target tile sizes,
-    which are then propagated to neighbouring elementwise / fill ops so that a
-    fusable group shares a consistent tiling. Selecting the anchors is the
-    caller's decision (via the `anchor_op` match).
-
-    This can be applied multiple times with different anchors (e.g. GEMMs first,
-    then leftover elementwise ops). Ops that are already annotated keep their
-    sizes, so earlier assignments take precedence.
+    Anchors matched by `anchor_op` are annotated and their sizes propagated to
+    neighboring ops so a fusable group shares one tiling. Can be applied repeatedly
+    with different anchors (e.g. GEMMs first, then leftover elementwise ops);
+    already-annotated ops keep their sizes, so earlier assignments win.
 
     Args:
         anchor_op: Op(s) to anchor tiling on. Defaults to the GEMM op family.
@@ -73,13 +65,11 @@ def assign_and_propagate_tile_sizes(
 
 def assign_elementwise_tile_sizes(tile_size: int = 32) -> ir.Module:
     """
-    Anchor tiling on elementwise ops only (step 1 and 2 fallback).
+    Anchor tiling on elementwise ops only.
 
-    Intended for kernels without a GEMM. All linalg ops are matched and then
-    filtered down to the genuinely elementwise ones (`filter_elementwise`);
-    those anchors are annotated and their sizes propagated to neighbours so they
-    can be fused. Ops already annotated (e.g. by a preceding GEMM assignment) are
-    left untouched.
+    For kernels without a GEMM: all linalg ops are matched, filtered to the
+    genuinely elementwise ones, annotated, and propagated from. Already-annotated
+    ops (e.g. from a preceding GEMM assignment) are kept.
 
     Args:
         tile_size: Size used for tiled dimensions. User hint, default 32.
@@ -102,14 +92,12 @@ def tile_and_fuse_annotated(
     use_forall: bool = True,
 ) -> ir.Module:
     """
-    Tile and fuse annotated groups using their tile-size annotations (step 3).
+    Tile and fuse annotated groups using their tile-size annotations.
 
-    Among the matched candidate ops, the fusion roots are selected (annotated
-    ops with no annotated consumer, e.g. the last elementwise op after a GEMM).
-    Each root is tiled with its annotated `transform_ext.tile_sizes` and its
-    producers are greedily fused into the tiled loop. This pulls a GEMM and its
-    elementwise consumers into a single tiled loop. The annotations act as the
-    fusion hints: producers sharing a consistent tiling fuse cleanly.
+    Fusion roots are selected among the candidates, each is tiled with its
+    annotated `transform_ext.tile_sizes`, and its producers are greedily fused into
+    the tiled loop -- pulling a barrier (e.g. a GEMM) and its elementwise neighbors
+    into one loop. The annotations act as fusion hints.
 
     Args:
         target_op: Candidate op(s) to consider. Defaults to all linalg ops.

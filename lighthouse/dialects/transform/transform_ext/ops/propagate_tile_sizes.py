@@ -10,33 +10,27 @@ class PropagateTileSizesOp(
     TransformExtensionDialect.Operation, name="propagate_tile_sizes"
 ):
     """
-    Propagate tile-size annotations from anchor ops to neighbouring ops.
+    Propagate tile-size annotations from anchor ops to their neighbors.
 
-    This is the second step of a generic "tile and fuse" strategy. Starting from
-    the already-annotated `root` ops (see `assign_tile_sizes`), the tile sizes
-    are maximally propagated to surrounding elementwise / fill ops that share a
-    tensor with an annotated op. Sizes are translated across each op's indexing
-    maps so that a shared tensor is tiled consistently on both sides, which makes
-    the annotations usable as fusion hints.
+    Starting from the annotated `root` ops, tile sizes are spread to surrounding
+    non-barrier ops that share a tensor, translating sizes across each op's indexing
+    maps so a shared tensor is tiled consistently on both sides.
 
-    Propagation happens in two phases so that a GEMM's epilogue takes precedence
-    over a downstream GEMM's prologue for a shared elementwise op:
+    Two phases, so a barrier's epilogue wins over a downstream barrier's prologue
+    for a shared op:
 
-      1. forward (epilogue): from the anchors, follow consumers and claim the
-         elementwise ops downstream of each anchor. This stops at the next GEMM,
-         so an op between two GEMMs is tiled to match its *producer* GEMM.
-      2. backward (prologue): from all annotated ops, follow producers and claim
-         the remaining upstream elementwise / fill ops.
+      1. forward (epilogue): follow consumers from the anchors, stopping at the
+         next barrier -- an op between two barriers is tiled to match its producer.
+      2. backward (prologue): follow producers from all annotated ops to claim the
+         remaining prologue ops (e.g. fills, and producers behind epilogue inputs).
 
-    Only tileable elementwise-like ops are targeted; contraction (anchor) ops are
-    never re-tiled and act as barriers. Reduction dimensions are never tiled.
-    Ops that are already annotated keep their existing sizes.
+    Barriers (heavy compute ops) are never re-tiled. Reduction dimensions are never
+    tiled, and already-annotated ops keep their sizes.
 
     Args:
         root: Handle to annotated anchor op(s).
     Return:
-        Handle to all ops carrying a tile-size annotation after propagation
-        (the roots plus the newly annotated ops).
+        Handle to all annotated ops after propagation (roots plus newly annotated).
     """
 
     root: ext.Operand[transform.AnyOpType]

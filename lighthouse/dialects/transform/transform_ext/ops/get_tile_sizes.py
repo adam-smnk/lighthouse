@@ -10,12 +10,10 @@ class GetTileSizesOp(TransformExtensionDialect.Operation, name="get_tile_sizes")
     """
     Read the tile sizes annotated on an op as a transform param.
 
-    This is the bridge between tile-size assignment/propagation (which store
-    sizes as a `transform_ext.tile_sizes` attribute) and the tile-and-fuse step
-    (which consumes individual sizes, e.g. via `transform.structured.fuse`).
+    Reads the `transform_ext.tile_sizes` attribute of a single op and returns its
+    entries as a param, one integer per iteration dimension (loop order).
 
-    The `target` must resolve to a single annotated op. The result param holds
-    one integer value per iteration dimension, in loop order.
+    `target` must resolve to a single annotated op.
 
     Args:
         target: Handle to a single annotated op.

@@ -3,7 +3,7 @@
 # Generalizes the matmul-specific cache tiling (pack_and_tile.yaml) to arbitrary
 # KernelBench workloads using a three-step, attribute-driven strategy:
 #   1. assign target tile sizes to anchor ops (GEMMs take precedence)
-#   2. propagate the sizes to neighbouring elementwise / fill ops
+#   2. propagate the sizes to neighboring elementwise / fill ops
 #   3. tile each fusable group at its root and greedily fuse producers
 #
 # Tiling aims for 2D tiles over the innermost parallel dims; batch/outer parallel

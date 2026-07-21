@@ -10,11 +10,8 @@ class AssignTileSizesOp(TransformExtensionDialect.Operation, name="assign_tile_s
     """
     Assign target tile sizes to anchor ops as IR attribute annotations.
 
-    This is the first step of a generic "tile and fuse" strategy. Each `target`
-    op is analysed and annotated with a `transform_ext.tile_sizes` attribute
-    holding one tile size per iteration dimension (in loop order). The sizes can
-    later be propagated to neighbouring ops (see `propagate_tile_sizes`) and
-    consumed by a tile-and-fuse step (see `get_tile_sizes`).
+    Each `target` op is analysed and annotated with a `transform_ext.tile_sizes`
+    attribute holding one tile size per iteration dimension (in loop order).
 
     Tiling aims for 2D tiles over the innermost parallel dimensions:
       * GEMM-like ops (matmul, batch matmul, contraction, ...): batch dims are

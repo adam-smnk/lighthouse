@@ -1,11 +1,8 @@
 """Shared analysis helpers for tile-size selection and propagation.
 
-These utilities operate on linalg ops and are used to implement a generic
-"tile and fuse" strategy:
-
-    1. assign target tile sizes for key anchor ops (e.g. matmuls)
-    2. propagate the tile sizes to neighbouring elementwise ops
-    3. tile and fuse using the assigned sizes (sizes also act as fusion hints)
+These utilities operate on linalg ops: computing target tile sizes, translating
+them across indexing maps between ops that share a tensor, and classifying ops
+as fusion barriers or propagation targets.
 
 Tile sizes are stored on payload ops as a discardable attribute.
 """
@@ -112,18 +109,12 @@ def compute_tile_sizes(
 ) -> list[int] | None:
     """Compute target tile sizes for an op over its iteration space.
 
-    Selecting which ops to tile (the anchors) is an external decision; this
-    routine only computes sizes for whatever op it is given.
+    The innermost `parallel_tile_dims` parallel (output) dims are tiled with
+    `tile_size`, any remaining parallel dims (batch / outer M/N) with a unit size,
+    and reduction dims are left untiled. Statically small parallel dims are also
+    left untiled.
 
-    The innermost `parallel_tile_dims` parallel (output) dimensions are tiled
-    with `tile_size`; any remaining parallel dimensions (e.g. batch dims or the
-    outer M/N dims of a high-dimensional contraction) are tiled with a unit
-    size; and reduction dimensions are left untiled.
-
-    Statically sized small parallel dimensions are left untiled.
-
-    Returns one size per iteration dimension (loop order), or None if the op
-    is not supported.
+    Returns one size per iteration dim (loop order), or None if unsupported.
     """
     ov = _opview(op)
     maps = indexing_maps(ov)
@@ -170,13 +161,8 @@ def set_tile_sizes_attr(op: ir.Operation | ir.OpView, sizes: Sequence[int]) -> N
 def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
     """Whether tile sizes may be propagated onto this op.
 
-    Anchor ops (fusion barriers) define tile sizes; propagation targets the
-    surrounding structured linalg ops (elementwise / fill / broadcast / reduce
-    ...) that can share their tiling and be fused. Any structured linalg op that
-    is not a fusion barrier is a valid propagation target -- barriers are the
-    heavy compute ops (contractions, convolutions / pooling) that stay as anchors
-    (see `is_fusion_barrier`). Non-linalg ops have no indexing maps to translate
-    tiles through and are excluded.
+    True for any structured linalg op that is not a fusion barrier; non-linalg
+    ops have no indexing maps to translate tiles through and are excluded.
     """
     return indexing_maps(op) is not None and not is_fusion_barrier(op)
 
@@ -211,13 +197,10 @@ def propagate_through_value(
 ) -> list[int] | None:
     """Propagate tile sizes from `src_op` to `dst_op` via a shared tensor.
 
-    The shared tensor `shared` is produced/consumed by both ops. Its
-    per-dimension tile sizes are derived from `src_op`'s iteration-space sizes
-    and then mapped onto `dst_op`'s iteration space. Reduction dimensions of
-    `dst_op` are never tiled.
+    The shared tensor's per-dimension tiles are derived from `src_op`'s sizes and
+    mapped onto `dst_op`'s iteration space; reduction dims of `dst_op` stay untiled.
 
-    Returns the tile sizes for `dst_op` (loop order), or None if propagation is
-    not possible.
+    Returns `dst_op`'s tile sizes (loop order), or None if not possible.
     """
     src = _opview(src_op)
     dst = _opview(dst_op)
@@ -261,15 +244,13 @@ def propagate_through_value(
 
 
 def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
-    """Whether the op acts as a fusion barrier.
+    """Whether the op acts as a fusion barrier (groups are not fused across it).
 
-    Fusion groups are not fused across a barrier. The barriers are:
-      * Heavy compute ops -- contractions and convolutions / pooling: on average
-        it is more profitable to keep each in its own fused loop with its
-        elementwise prologue and epilogue than to fuse several together. They
-        also act as tiling anchors rather than propagation targets.
-      * pack / unpack ops: layout changes that stay as materialization
-        boundaries; they are neither propagation anchors nor fused into a group.
+    Barriers are:
+      * heavy compute ops -- contractions and convolutions / pooling: kept in
+        their own fused loop (with elementwise prologue / epilogue) and used as
+        tiling anchors rather than propagation targets.
+      * pack / unpack ops: layout changes that stay as materialization boundaries.
     """
     ov = _opview(op)
     if isinstance(ov, (linalg.PackOp, linalg.UnPackOp)):

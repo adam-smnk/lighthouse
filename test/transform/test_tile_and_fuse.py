@@ -4,7 +4,7 @@
 
 Exercises the three-step strategy on linalg payloads:
     1. assign tile sizes to anchor ops (GEMMs / elementwise)
-    2. propagate them to neighbouring ops
+    2. propagate them to neighboring ops
     3. tile and fuse using the annotations
 """
 

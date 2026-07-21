@@ -43,10 +43,10 @@ class FilterElementwiseOp(
     """
     Returns the target ops that are elementwise linalg ops.
 
-    An op is elementwise when it computes its result pointwise (see
-    `is_elementwise`): all loops are parallel, every indexing map is a projected
-    permutation, and each output (DPS init) map is a full permutation. Targets
-    that are not elementwise linalg ops are dropped.
+    An op is elementwise when it computes its result pointwise: all loops are
+    parallel, every indexing map is a projected permutation, and each output
+    (DPS init) map is a full permutation. Targets that are not elementwise linalg
+    ops are dropped.
 
     Args:
         target: Handle to target op(s).
