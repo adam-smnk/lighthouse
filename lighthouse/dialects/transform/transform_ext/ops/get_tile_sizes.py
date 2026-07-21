@@ -3,7 +3,7 @@ from mlir.dialects import ext, transform
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
-from lighthouse.dialects.transform.transform_ext import tile_size_analysis as tsa
+from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 
 
 class GetTileSizesOp(TransformExtensionDialect.Operation, name="get_tile_sizes"):

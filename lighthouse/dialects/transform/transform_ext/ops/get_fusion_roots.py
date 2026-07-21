@@ -3,7 +3,9 @@ from mlir.dialects import ext, transform
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
-from lighthouse.dialects.transform.transform_ext import tile_size_analysis as tsa
+from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
+from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
+from lighthouse.utils.mlir import op_users
 
 
 class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roots"):
@@ -48,17 +50,17 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
         annotated_consumers = [
             user
             for result in target_op.opview.results
-            for user in tsa.op_users(result)
+            for user in op_users(result)
             if tsa.get_tile_sizes_attr(user) is not None
         ]
         # End of an elementwise chain: no annotated non-barrier consumer.
-        if any(not tsa.is_fusion_barrier(user) for user in annotated_consumers):
+        if any(not fa.is_fusion_barrier(user) for user in annotated_consumers):
             return False
         # A fusion barrier (e.g. a GEMM) with no elementwise epilogue is its own root.
-        if tsa.is_fusion_barrier(target_op):
+        if fa.is_fusion_barrier(target_op):
             return True
         # An epilogue op (downstream of a barrier) is the group's terminal root.
-        if tsa.has_barrier_ancestor(target_op):
+        if fa.has_barrier_ancestor(target_op):
             return True
         # A pure prologue op feeding a barrier (e.g. a fill) is fused as a
         # producer of the barrier's root, not on its own.

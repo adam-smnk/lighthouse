@@ -3,7 +3,7 @@ from mlir.dialects import ext, transform
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
-from lighthouse.dialects.transform.transform_ext import tile_size_analysis as tsa
+from lighthouse.utils.mlir import num_loops
 
 
 class GetLeadingUnitTileSizesOp(
@@ -42,7 +42,7 @@ class GetLeadingUnitTileSizesOp(
             if len(target_ops) != 1:
                 return DiagnosedSilenceableFailure.SilenceableFailure
 
-            loops = tsa.num_loops(target_ops[0])
+            loops = num_loops(target_ops[0])
             if loops is None:
                 return DiagnosedSilenceableFailure.SilenceableFailure
 

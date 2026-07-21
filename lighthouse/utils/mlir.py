@@ -181,3 +181,67 @@ def inspect_payload(payload_module: ir.Module) -> dict:
     for op in payload_module.body.operations:
         op.walk(match_funcs, ir.WalkOrder.PRE_ORDER)
     return functions
+
+
+def opview(op: ir.Operation | ir.OpView) -> ir.OpView:
+    """Return the ``OpView`` of an op (identity for an ``OpView``)."""
+    return op.opview if isinstance(op, ir.Operation) else op
+
+
+def dim_position(expr: ir.AffineExpr) -> int | None:
+    """Return the dimension position of a plain dimension expression.
+
+    Returns None for non-dimension expressions (constants, composite exprs).
+    """
+    if isinstance(expr, ir.AffineDimExpr):
+        return expr.position
+    return None
+
+
+def indexing_maps(op: ir.Operation | ir.OpView) -> list[ir.AffineMap] | None:
+    """Return the indexing maps of a structured linalg op as ``AffineMap``s.
+
+    The returned list follows the operand order: inputs first, then outputs.
+    Returns None if the op is not a structured linalg op.
+    """
+    try:
+        raw_maps = linalg.get_indexing_maps(opview(op))
+    except (TypeError, ValueError):
+        return None
+    if not raw_maps:
+        return None
+
+    maps = []
+    for m in raw_maps:
+        maps.append(m.value if isinstance(m, ir.AffineMapAttr) else m)
+    return maps
+
+
+def num_loops(op: ir.Operation | ir.OpView) -> int | None:
+    """Number of iteration dims (loops) of a structured linalg op, or None."""
+    maps = indexing_maps(op)
+    if not maps:
+        return None
+    return maps[0].n_dims
+
+
+def op_users(value: ir.Value) -> list[ir.Operation]:
+    """Return the ops that use `value`."""
+    users = []
+    for use in value.uses:
+        owner = use.owner
+        if isinstance(owner, ir.OpView):
+            users.append(owner.operation)
+        elif isinstance(owner, ir.Operation):
+            users.append(owner)
+    return users
+
+
+def defining_op(value: ir.Value) -> ir.Operation | None:
+    """Return the op defining `value`, or None for block arguments."""
+    owner = value.owner
+    if isinstance(owner, ir.OpView):
+        return owner.operation
+    if isinstance(owner, ir.Operation):
+        return owner
+    return None

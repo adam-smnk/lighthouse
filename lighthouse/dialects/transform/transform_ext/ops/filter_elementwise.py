@@ -3,7 +3,7 @@ from mlir.dialects import ext, transform, linalg
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
-from lighthouse.dialects.transform.transform_ext import tile_size_analysis as tsa
+from lighthouse.utils.mlir import indexing_maps
 
 
 def _all_loops_parallel(op: ir.OpView) -> bool:
@@ -22,7 +22,7 @@ def is_elementwise(op: ir.Operation | ir.OpView) -> bool:
     operands), and each output (DPS init) map is a full permutation.
     """
     ov = op.opview if isinstance(op, ir.Operation) else op
-    maps = tsa.indexing_maps(ov)
+    maps = indexing_maps(ov)
     if maps is None:
         return False
     # No reduction / window loops. Only a generic can declare non-parallel

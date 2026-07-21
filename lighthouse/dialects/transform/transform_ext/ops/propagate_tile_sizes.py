@@ -3,7 +3,9 @@ from mlir.dialects import ext, transform
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
-from lighthouse.dialects.transform.transform_ext import tile_size_analysis as tsa
+from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
+from lighthouse.dialects.transform.transform_ext.utils import tile_propagation as tp
+from lighthouse.utils.mlir import op_users, defining_op
 
 
 class PropagateTileSizesOp(
@@ -68,9 +70,9 @@ class PropagateTileSizesOp(
             ) -> ir.Operation | None:
                 if tsa.get_tile_sizes_attr(dst) is not None:
                     return None
-                if not tsa.is_propagatable(dst):
+                if not tp.is_propagatable(dst):
                     return None
-                dst_sizes = tsa.propagate_through_value(src, src_sizes, shared, dst)
+                dst_sizes = tp.propagate_through_value(src, src_sizes, shared, dst)
                 if dst_sizes is None or not any(dst_sizes):
                     return None
                 tsa.set_tile_sizes_attr(dst, dst_sizes)
@@ -89,7 +91,7 @@ class PropagateTileSizesOp(
                 idx += 1
                 src_sizes = tsa.get_tile_sizes_attr(src)
                 for result in src.opview.results:
-                    for user in tsa.op_users(result):
+                    for user in op_users(result):
                         dst = claim(src, src_sizes, result, user)
                         if dst is not None:
                             forward.append(dst)
@@ -105,7 +107,7 @@ class PropagateTileSizesOp(
                 idx += 1
                 src_sizes = tsa.get_tile_sizes_attr(src)
                 for operand in src.opview.operands:
-                    producer = tsa.defining_op(operand)
+                    producer = defining_op(operand)
                     if producer is None:
                         continue
                     dst = claim(src, src_sizes, operand, producer)
