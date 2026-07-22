@@ -36,11 +36,14 @@ PACK_UNPACK_2D = """
 module {
   func.func @main(%a: tensor<128x256xf32>) -> tensor<128x256xf32> {
     %d = tensor.empty() : tensor<4x8x32x32xf32>
-    %packed = linalg.pack %a inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %d : tensor<128x256xf32> -> tensor<4x8x32x32xf32>
+    %packed = linalg.pack %a inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %d
+        : tensor<128x256xf32> -> tensor<4x8x32x32xf32>
     %e = tensor.empty() : tensor<4x8x32x32xf32>
-    %r = linalg.copy ins(%packed: tensor<4x8x32x32xf32>) outs(%e: tensor<4x8x32x32xf32>) -> tensor<4x8x32x32xf32>
+    %r = linalg.copy ins(%packed : tensor<4x8x32x32xf32>)
+        outs(%e : tensor<4x8x32x32xf32>) -> tensor<4x8x32x32xf32>
     %o = tensor.empty() : tensor<128x256xf32>
-    %u = linalg.unpack %r inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o : tensor<4x8x32x32xf32> -> tensor<128x256xf32>
+    %u = linalg.unpack %r inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o
+        : tensor<4x8x32x32xf32> -> tensor<128x256xf32>
     return %u : tensor<128x256xf32>
   }
 }
@@ -52,11 +55,14 @@ PACK_UNPACK_3D = """
 module {
   func.func @main(%a: tensor<2x128x256xf32>) -> tensor<2x128x256xf32> {
     %d = tensor.empty() : tensor<2x4x8x32x32xf32>
-    %packed = linalg.pack %a inner_dims_pos = [1, 2] inner_tiles = [32, 32] into %d : tensor<2x128x256xf32> -> tensor<2x4x8x32x32xf32>
+    %packed = linalg.pack %a inner_dims_pos = [1, 2] inner_tiles = [32, 32] into %d
+        : tensor<2x128x256xf32> -> tensor<2x4x8x32x32xf32>
     %e = tensor.empty() : tensor<2x4x8x32x32xf32>
-    %r = linalg.copy ins(%packed: tensor<2x4x8x32x32xf32>) outs(%e: tensor<2x4x8x32x32xf32>) -> tensor<2x4x8x32x32xf32>
+    %r = linalg.copy ins(%packed : tensor<2x4x8x32x32xf32>)
+        outs(%e : tensor<2x4x8x32x32xf32>) -> tensor<2x4x8x32x32xf32>
     %o = tensor.empty() : tensor<2x128x256xf32>
-    %u = linalg.unpack %r inner_dims_pos = [1, 2] inner_tiles = [32, 32] into %o : tensor<2x4x8x32x32xf32> -> tensor<2x128x256xf32>
+    %u = linalg.unpack %r inner_dims_pos = [1, 2] inner_tiles = [32, 32] into %o
+        : tensor<2x4x8x32x32xf32> -> tensor<2x128x256xf32>
     return %u : tensor<2x128x256xf32>
   }
 }
@@ -67,15 +73,20 @@ module {
 # heterogeneous pack ranks in a single schedule application.
 MIXED = """
 module {
-  func.func @main(%bias: tensor<512xf32>, %mat: tensor<128x1024xf32>) -> (tensor<16x32xf32>, tensor<128x1024xf32>) {
+  func.func @main(%bias: tensor<512xf32>, %mat: tensor<128x1024xf32>)
+        -> (tensor<16x32xf32>, tensor<128x1024xf32>) {
     %db = tensor.empty() : tensor<16x32xf32>
-    %pbias = linalg.pack %bias inner_dims_pos = [0] inner_tiles = [32] into %db : tensor<512xf32> -> tensor<16x32xf32>
+    %pbias = linalg.pack %bias inner_dims_pos = [0] inner_tiles = [32] into %db
+        : tensor<512xf32> -> tensor<16x32xf32>
     %dm = tensor.empty() : tensor<4x32x32x32xf32>
-    %pmat = linalg.pack %mat inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %dm : tensor<128x1024xf32> -> tensor<4x32x32x32xf32>
+    %pmat = linalg.pack %mat inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %dm
+        : tensor<128x1024xf32> -> tensor<4x32x32x32xf32>
     %e = tensor.empty() : tensor<4x32x32x32xf32>
-    %r = linalg.copy ins(%pmat: tensor<4x32x32x32xf32>) outs(%e: tensor<4x32x32x32xf32>) -> tensor<4x32x32x32xf32>
+    %r = linalg.copy ins(%pmat : tensor<4x32x32x32xf32>)
+        outs(%e : tensor<4x32x32x32xf32>) -> tensor<4x32x32x32xf32>
     %o = tensor.empty() : tensor<128x1024xf32>
-    %u = linalg.unpack %r inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o : tensor<4x32x32x32xf32> -> tensor<128x1024xf32>
+    %u = linalg.unpack %r inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o
+        : tensor<4x32x32x32xf32> -> tensor<128x1024xf32>
     return %pbias, %u : tensor<16x32xf32>, tensor<128x1024xf32>
   }
 }
@@ -86,9 +97,11 @@ PACK_ASSIGN = """
 module {
   func.func @main(%a: tensor<128x256xf32>) -> tensor<128x256xf32> {
     %d = tensor.empty() : tensor<4x8x32x32xf32>
-    %p = linalg.pack %a inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %d : tensor<128x256xf32> -> tensor<4x8x32x32xf32>
+    %p = linalg.pack %a inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %d
+        : tensor<128x256xf32> -> tensor<4x8x32x32xf32>
     %o = tensor.empty() : tensor<128x256xf32>
-    %u = linalg.unpack %p inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o : tensor<4x8x32x32xf32> -> tensor<128x256xf32>
+    %u = linalg.unpack %p inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o
+        : tensor<4x8x32x32xf32> -> tensor<128x256xf32>
     return %u : tensor<128x256xf32>
   }
 }

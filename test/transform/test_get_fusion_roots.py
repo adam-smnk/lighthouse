@@ -41,23 +41,37 @@ def apply_schedule(payload_str, build_roots, name):
 SCRAMBLED = """
 #id = affine_map<(d0, d1) -> (d0, d1)>
 module {
-  func.func @main(%a: tensor<10x10xf32>, %b: tensor<11x11xf32>, %c: tensor<12x12xf32>, %d: tensor<13x13xf32>)
-      -> (tensor<10x10xf32>, tensor<11x11xf32>, tensor<12x12xf32>, tensor<13x13xf32>) {
+  func.func @main(%a: tensor<10x10xf32>, %b: tensor<11x11xf32>, %c: tensor<12x12xf32>,
+        %d: tensor<13x13xf32>)
+        -> (tensor<10x10xf32>, tensor<11x11xf32>, tensor<12x12xf32>, tensor<13x13xf32>) {
     %e0 = tensor.empty() : tensor<10x10xf32>
-    %gA = linalg.generic {indexing_maps = [#id, #id], iterator_types = ["parallel", "parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%a: tensor<10x10xf32>) outs(%e0: tensor<10x10xf32>) {
+    %gA = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%a : tensor<10x10xf32>)
+        outs(%e0 : tensor<10x10xf32>) {
     ^bb0(%i: f32, %o: f32):
       linalg.yield %i : f32
     } -> tensor<10x10xf32>
     %e1 = tensor.empty() : tensor<11x11xf32>
-    %addB = linalg.add {transform_ext.tile_sizes = array<i64: 32, 32>} ins(%b, %b: tensor<11x11xf32>, tensor<11x11xf32>) outs(%e1: tensor<11x11xf32>) -> tensor<11x11xf32>
+    %addB = linalg.add {transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%b, %b : tensor<11x11xf32>, tensor<11x11xf32>)
+        outs(%e1 : tensor<11x11xf32>) -> tensor<11x11xf32>
     %e2 = tensor.empty() : tensor<12x12xf32>
-    %gC = linalg.generic {indexing_maps = [#id, #id], iterator_types = ["parallel", "parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%c: tensor<12x12xf32>) outs(%e2: tensor<12x12xf32>) {
+    %gC = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%c : tensor<12x12xf32>)
+        outs(%e2 : tensor<12x12xf32>) {
     ^bb0(%i: f32, %o: f32):
       linalg.yield %i : f32
     } -> tensor<12x12xf32>
     %e3 = tensor.empty() : tensor<13x13xf32>
-    %addD = linalg.add {transform_ext.tile_sizes = array<i64: 32, 32>} ins(%d, %d: tensor<13x13xf32>, tensor<13x13xf32>) outs(%e3: tensor<13x13xf32>) -> tensor<13x13xf32>
-    return %gA, %addB, %gC, %addD : tensor<10x10xf32>, tensor<11x11xf32>, tensor<12x12xf32>, tensor<13x13xf32>
+    %addD = linalg.add {transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%d, %d : tensor<13x13xf32>, tensor<13x13xf32>)
+        outs(%e3 : tensor<13x13xf32>) -> tensor<13x13xf32>
+    return %gA, %addB, %gC, %addD
+        : tensor<10x10xf32>, tensor<11x11xf32>, tensor<12x12xf32>, tensor<13x13xf32>
   }
 }
 """
@@ -71,9 +85,17 @@ module {
   func.func @main(%a: tensor<32x32xf32>, %w: tensor<32x32xf32>) -> tensor<32x32xf32> {
     %cst = arith.constant 0.0 : f32
     %e = tensor.empty() : tensor<32x32xf32>
-    %f = linalg.fill {transform_ext.tile_sizes = array<i64: 32, 32>} ins(%cst: f32) outs(%e: tensor<32x32xf32>) -> tensor<32x32xf32>
-    %mm = linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>} ins(%a, %w: tensor<32x32xf32>, tensor<32x32xf32>) outs(%f: tensor<32x32xf32>) -> tensor<32x32xf32>
-    %relu = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%mm: tensor<32x32xf32>) outs(%e: tensor<32x32xf32>) {
+    %f = linalg.fill {transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%cst : f32)
+        outs(%e : tensor<32x32xf32>) -> tensor<32x32xf32>
+    %mm = linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+        ins(%a, %w : tensor<32x32xf32>, tensor<32x32xf32>)
+        outs(%f : tensor<32x32xf32>) -> tensor<32x32xf32>
+    %relu = linalg.generic {indexing_maps = [#map, #map],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%mm : tensor<32x32xf32>)
+        outs(%e : tensor<32x32xf32>) {
     ^bb0(%i: f32, %o: f32):
       %c = arith.cmpf ugt, %i, %cst : f32
       %s = arith.select %c, %i, %cst : f32
@@ -91,8 +113,12 @@ module {
   func.func @main(%a: tensor<32x32xf32>, %w: tensor<32x32xf32>) -> tensor<32x32xf32> {
     %cst = arith.constant 0.0 : f32
     %e = tensor.empty() : tensor<32x32xf32>
-    %f = linalg.fill {transform_ext.tile_sizes = array<i64: 32, 32>} ins(%cst: f32) outs(%e: tensor<32x32xf32>) -> tensor<32x32xf32>
-    %mm = linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>} ins(%a, %w: tensor<32x32xf32>, tensor<32x32xf32>) outs(%f: tensor<32x32xf32>) -> tensor<32x32xf32>
+    %f = linalg.fill {transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%cst : f32)
+        outs(%e : tensor<32x32xf32>) -> tensor<32x32xf32>
+    %mm = linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+        ins(%a, %w : tensor<32x32xf32>, tensor<32x32xf32>)
+        outs(%f : tensor<32x32xf32>) -> tensor<32x32xf32>
     return %mm : tensor<32x32xf32>
   }
 }
@@ -109,13 +135,21 @@ module {
   func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
     %cst = arith.constant 0.0 : f32
     %e0 = tensor.empty() : tensor<128x128xf32>
-    %p = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%a: tensor<128x128xf32>) outs(%e0: tensor<128x128xf32>) {
+    %p = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%a : tensor<128x128xf32>)
+        outs(%e0 : tensor<128x128xf32>) {
     ^bb0(%i: f32, %o: f32):
       %e = math.exp %i : f32
       linalg.yield %e : f32
     } -> tensor<128x128xf32>
     %e1 = tensor.empty() : tensor<128x128xf32>
-    %c = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 64, 64>} ins(%p: tensor<128x128xf32>) outs(%e1: tensor<128x128xf32>) {
+    %c = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 64, 64>}
+        ins(%p : tensor<128x128xf32>)
+        outs(%e1 : tensor<128x128xf32>) {
     ^bb0(%i: f32, %o: f32):
       %s = math.sqrt %i : f32
       linalg.yield %s : f32
@@ -133,13 +167,21 @@ module {
   func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
     %cst = arith.constant 0.0 : f32
     %e0 = tensor.empty() : tensor<128x128xf32>
-    %p = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%a: tensor<128x128xf32>) outs(%e0: tensor<128x128xf32>) {
+    %p = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%a : tensor<128x128xf32>)
+        outs(%e0 : tensor<128x128xf32>) {
     ^bb0(%i: f32, %o: f32):
       %e = math.exp %i : f32
       linalg.yield %e : f32
     } -> tensor<128x128xf32>
     %e1 = tensor.empty() : tensor<128x128xf32>
-    %c = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%p: tensor<128x128xf32>) outs(%e1: tensor<128x128xf32>) {
+    %c = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%p : tensor<128x128xf32>)
+        outs(%e1 : tensor<128x128xf32>) {
     ^bb0(%i: f32, %o: f32):
       %s = math.sqrt %i : f32
       linalg.yield %s : f32
