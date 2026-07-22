@@ -7,28 +7,18 @@ from lighthouse.utils.mlir import indexing_maps, linalg_inputs
 
 
 def _all_loops_parallel(op: ir.OpView) -> bool:
-    """Whether all iterator types of a (generic) op are parallel."""
+    """Check whether all iterator types of a (generic) op are parallel."""
     build = ir.AttrBuilder.get("linalg.IteratorTypeEnum")
     parallel = build(linalg.IteratorType.parallel, context=op.context)
     return all(it == parallel for it in op.iterator_types)
 
 
 def is_elementwise(op: ir.Operation | ir.OpView) -> bool:
-    """Whether the op is an elementwise linalg op.
-
-    Mirrors `mlir::linalg::isElementwise`: the op computes its result pointwise.
-    All loops are parallel (num loops == num parallel loops), every indexing map
-    is a projected permutation (identity, transpose or broadcast of the
-    operands), and each output (DPS init) map is a full permutation.
-    """
+    """Check whether the op is an elementwise linalg op."""
     ov = op.opview if isinstance(op, ir.Operation) else op
     maps = indexing_maps(ov)
     if maps is None:
         return False
-    # No reduction / window loops. Only a generic can declare non-parallel
-    # iterators here; other structured ops that pass the map checks below are
-    # elementwise by construction (a contraction / reduction / pooling drops a
-    # loop dim from its output map and so fails the permutation check).
     if isinstance(ov, linalg.GenericOp) and not _all_loops_parallel(ov):
         return False
     if not all(m.is_projected_permutation for m in maps):
@@ -43,10 +33,7 @@ class FilterElementwiseOp(
     """
     Returns the target ops that are elementwise linalg ops.
 
-    An op is elementwise when it computes its result pointwise: all loops are
-    parallel, every indexing map is a projected permutation, and each output
-    (DPS init) map is a full permutation. Targets that are not elementwise linalg
-    ops are dropped.
+    Targets that are not elementwise linalg ops are dropped.
 
     Args:
         target: Handle to target op(s).

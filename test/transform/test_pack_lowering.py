@@ -1,15 +1,5 @@
 # RUN: %PYTHON %s | FileCheck %s
 
-"""Tests for the x86 pack/unpack lowering schedule.
-
-`lower_packs_unpacks` derives the initial pack/unpack tiling from the
-tile_size_analysis framework and then vectorizes the resulting transpose / copy
-ops. These tests check that it lowers pack/unpack ops of varying dimensionality
-(1-D bias packs, 2-D matrix packs, higher-rank packs) to 1-D vector transfers
-with nothing left un-lowered, and that the pack/unpack tile sizes are selected
-from the pack structure.
-"""
-
 from mlir import ir
 from mlir.dialects import transform
 

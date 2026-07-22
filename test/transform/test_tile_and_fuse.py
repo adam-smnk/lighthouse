@@ -131,8 +131,8 @@ module {
 }
 """
 
-# A named elementwise op (linalg.add) followed by a relu generic. The
-# elementwise anchor schedule must cover named variants, not just linalg.generic.
+# A named elementwise op (linalg.add) followed by a relu generic.
+# The elementwise anchor schedule must cover named variants, not just linalg.generic.
 NAMED_ELTWISE = """
 #id = affine_map<(d0, d1) -> (d0, d1)>
 module {
@@ -187,7 +187,7 @@ module {
 """
 
 # Two GEMMs chained through a relu. The relu is the epilogue of the first matmul
-# and the "prologue" of the second: it must be tiled to match its producer GEMM.
+# and the prologue of the second: it must be tiled to match its producer GEMM.
 TWO_GEMM = """
 #map = affine_map<(d0, d1) -> (d0, d1)>
 module {
@@ -274,8 +274,7 @@ module {
 }
 """
 
-# A matmul + relu with dynamic (?) M and N dimensions. Tiling uses the runtime
-# extents (tensor.dim) for the loop bounds and clamps boundary tiles.
+# A matmul + relu with dynamic M and N dimensions.
 DYN = """
 #map = affine_map<(d0, d1) -> (d0, d1)>
 module {
@@ -299,8 +298,7 @@ module {
 }
 """
 
-# A high-dimensional linalg.contract: C[b, m0, m1, n] = sum_k A[b, m0, m1, k] *
-# B[b, k, n]. It has a batch dim, two M dims and one N dim, plus a reduction.
+# A high-dimensional contraction.
 HIGH_DIM_CONTRACT = """
 #mapA = affine_map<(b, m0, m1, n, k) -> (b, m0, m1, k)>
 #mapB = affine_map<(b, m0, m1, n, k) -> (b, k, n)>
@@ -319,9 +317,8 @@ module {
 }
 """
 
-# A matvec (C[m] = A[m, k] * B[k]) with a relu epilogue: a GEMM whose result is
-# 1D. Its single parallel (M) dim must still be tiled under the default
-# DEFAULT_PARALLEL_TILE_DIMS (2).
+# A matvec (C[m] = A[m, k] * B[k]) with a relu epilogue: a GEMM whose result is 1D.
+# Its single parallel (M) dim must still be tiled under the default 2D tile.
 MATVEC = """
 #map = affine_map<(d0) -> (d0)>
 module {
@@ -404,10 +401,10 @@ module {
 """
 
 
-# Two chained elementwise ops hand-annotated (outside the framework) with
-# conflicting tile sizes: producer 32x32 -> consumer 64x64. Their tilings
-# disagree on the shared tensor, so they are separate groups and must not be
-# fused into one loop.
+# Two chained elementwise ops annotated with conflicting tile sizes:
+#   producer 32x32 -> consumer 64x64.
+# Their tilings disagree on the shared tensor, so they are separate groups and
+# must not be fused into one loop.
 INCOMPAT_SPLIT = """
 #id = affine_map<(d0, d1) -> (d0, d1)>
 module {
@@ -438,10 +435,9 @@ module {
 }
 """
 
-# A chain whose downstream op is pre-annotated (outside the framework) with a
-# conflicting tile size (64x64). Assigning + propagating from the upstream op
-# (32x32) reaches the pre-annotated op and records a fusion boundary on it, so
-# grouping keeps the two apart cheaply.
+# A chain whose downstream op is pre-annotated with a conflicting tile size (64x64).
+# Assigning + propagating from the upstream op (32x32) reaches the pre-annotated op
+# and records a fusion boundary on it.
 PRE_ANNOTATED = """
 #id = affine_map<(d0, d1) -> (d0, d1)>
 module {
@@ -472,9 +468,7 @@ module {
 """
 
 # A broadcasting generic (bias[128] -> [64x128], input map drops the leading dim)
-# feeding a relu. Broadcasts are beneficial to fuse and FuseOp handles them, so
-# the leniency for untiled/broadcast dims in the compatibility check must keep
-# the broadcast fused with its consumer in a single loop.
+# feeding a relu.
 BROADCAST = """
 #bc_in = affine_map<(d0, d1) -> (d1)>
 #id = affine_map<(d0, d1) -> (d0, d1)>
@@ -682,10 +676,9 @@ run("dynamic_tile_and_fuse", DYN, assign_gemm, tile_and_fuse)
 run("high_dim_contract", HIGH_DIM_CONTRACT, assign_gemm)
 
 
-# 1D results: the matvec's single parallel (M) dim is tiled with the full tile
-# size (its reduction K stays untiled) under the default DEFAULT_PARALLEL_TILE_DIMS,
-# and the group fuses into a single 1D scf.forall. Uses tile_and_fuse_keep so the
-# propagated tile sizes remain observable on the fused ops.
+# 1D results: the matvec's single parallel (M) dim is tiled with the full tile size
+# (its reduction K stays untiled) under the default 2D tile, and the group fuses into
+# a single 1D scf.forall.
 # CHECK-LABEL: Test: matvec_1d_tile_and_fuse
 # CHECK: scf.forall ({{.*}}) = (0) to (128) step (32)
 # CHECK: linalg.fill
@@ -722,9 +715,8 @@ run("permuted_propagation", PERMUTED, assign_gemm)
 run("pack_unpack_barrier", PACK_UNPACK, assign_elementwise, tile_and_fuse)
 
 
-# Conflicting hand-annotated tile sizes (32x32 producer, 64x64 consumer) are kept
-# apart: each op is tiled in its own scf.forall (32-step and 64-step), and the
-# second loop reads the first loop's result through a slice -- they are not fused.
+# Conflicting pre-annotated tile sizes (32x32 producer, 64x64 consumer) are kept
+# apart: each op is tiled in its own loop (32-step and 64-step).
 # CHECK-LABEL: Test: incompatible_annotations_split
 # CHECK: %[[L0:.+]] = scf.forall ({{.*}}) = (0, 0) to (128, 128) step (32, 32)
 # CHECK: math.exp
@@ -738,7 +730,7 @@ run("incompatible_annotations_split", INCOMPAT_SPLIT, tile_and_fuse)
 
 # A downstream op pre-annotated (64x64) conflicts with the propagated tiling
 # (32x32). Propagation records the split by marking the conflicting op with a
-# transform_ext.fusion_boundary attribute.
+# fusion attribute.
 # CHECK-LABEL: Test: boundary_marked_during_propagation
 # CHECK: tile_sizes = array<i64: 32, 32>
 # CHECK: transform_ext.fusion_boundary
@@ -773,10 +765,7 @@ run("boundary_split_tile_and_fuse", PRE_ANNOTATED, assign_elementwise, tile_and_
 run("broadcast_stays_fused", BROADCAST, assign_elementwise, tile_and_fuse)
 
 
-# Named linalg ops (broadcast, transpose) lack the .inputs / .outputs accessors,
-# so selecting and computing their tile sizes must go through the linalg_inputs /
-# linalg_outputs helpers. All three ops (broadcast, generic, transpose) are
-# elementwise and are annotated without crashing.
+# Named linalg ops annotation.
 # CHECK-LABEL: Test: named_broadcast_transpose_anchor
 # CHECK: linalg.broadcast
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
@@ -787,8 +776,7 @@ run("broadcast_stays_fused", BROADCAST, assign_elementwise, tile_and_fuse)
 run("named_broadcast_transpose_anchor", NAMED_BROADCAST_TRANSPOSE, assign_elementwise)
 
 
-# Propagation onto a named op: the matmul's tiles are propagated to the named
-# transpose consumer via _map_for_value, which must not crash on a named op.
+# Propagation onto a named op.
 # CHECK-LABEL: Test: gemm_named_transpose_propagate
 # CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
 # CHECK: linalg.transpose
@@ -817,7 +805,7 @@ module {
 
 
 # Fusion consumes the annotations, so by default they are cleared from the ops
-# now inside the generated loop, leaving no stale `transform_ext.*` attributes.
+# now inside the generated loop, leaving no stale tile and fuse annotations.
 # CHECK-LABEL: Test: clears_annotations_after_fuse
 # CHECK: scf.forall
 # CHECK-NOT: transform_ext.tile_sizes

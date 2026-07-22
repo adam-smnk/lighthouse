@@ -23,12 +23,12 @@ class PropagateTileSizesOp(
     for a shared op:
 
       1. forward (epilogue): follow consumers from the anchors, stopping at the
-         next barrier -- an op between two barriers is tiled to match its producer.
+         next barrier. An op between two barriers is tiled to match its producer.
       2. backward (prologue): follow producers from all annotated ops to claim the
          remaining prologue ops (e.g. fills, and producers behind epilogue inputs).
 
-    Barriers (heavy compute ops) are never re-tiled. Reduction dimensions are never
-    tiled, and already-annotated ops keep their sizes.
+    Barriers are never re-tiled. Reduction dimensions are never tiled, and already-annotated
+    ops keep their sizes.
 
     Args:
         root: Handle to annotated anchor op(s).

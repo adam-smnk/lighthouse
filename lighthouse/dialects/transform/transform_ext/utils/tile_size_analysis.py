@@ -1,9 +1,3 @@
-"""Analysis helpers for tile-size selection.
-
-These utilities compute target tile sizes for linalg ops and read / write the
-tile-size annotation stored on payload ops as a discardable attribute.
-"""
-
 from collections.abc import Sequence
 
 from mlir import ir

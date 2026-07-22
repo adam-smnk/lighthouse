@@ -10,21 +10,13 @@ class AssignTileSizesOp(TransformExtensionDialect.Operation, name="assign_tile_s
     """
     Assign target tile sizes to anchor ops as IR attribute annotations.
 
-    Each `target` op is analysed and annotated with a `transform_ext.tile_sizes`
-    attribute holding one tile size per iteration dimension (in loop order).
-
-    Tiling aims for 2D tiles over the innermost parallel dimensions:
-      * GEMM-like ops (matmul, batch matmul, contraction, ...): batch dims are
-        tiled by 1, the two contraction parallel dims (M, N) by `tile_size`, and
-        reduction dims (K) are left untiled.
-      * Other structured ops (e.g. elementwise generics): the innermost two
-        parallel dims are tiled by `tile_size`, other parallel dims by 1, and
-        reduction dims are left untiled.
+    Each `target` op is analysed and annotated with an attribute holding one tile size
+    per iteration dimension (in loop order).
 
     Statically small parallel dimensions are left untiled.
 
-    Targets for which no tile sizes can be computed are skipped (left
-    unannotated). The original `target` handle is returned for chaining.
+    Targets for which no tile sizes can be computed are skipped (left unannotated).
+    The original `target` handle is returned for chaining.
 
     Args:
         target: Handle to anchor op(s).

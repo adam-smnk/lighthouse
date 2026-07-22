@@ -1,19 +1,10 @@
-"""Fusion analysis helpers.
-
-Classify linalg ops relative to fusion groups: which ops are barriers that groups
-are not fused across, and whether an op sits downstream of such a barrier.
-"""
-
 from mlir import ir
 from mlir.dialects import linalg
 
 from lighthouse.utils.mlir import opview, defining_op
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 
-# Marks an op as the start of a new fusion group: its tile-size annotation was
-# found (during propagation) to conflict with an annotated producer, so the two
-# are kept in separate groups. Recorded so grouping stays cheap; grouping also
-# recomputes compatibility, so this is an optimisation rather than a requirement.
+# Attribute used to annotate an op as a new fusion separator.
 FUSION_BOUNDARY_ATTR_NAME = "transform_ext.fusion_boundary"
 
 
@@ -35,10 +26,10 @@ def clear_fusion_boundary(op: ir.Operation | ir.OpView) -> None:
 
 
 def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
-    """Whether the op acts as a fusion barrier (groups are not fused across it).
+    """Check whether the op acts as a fusion barrier (groups are not fused across it).
 
     Barriers are:
-      * heavy compute ops -- contractions and convolutions / pooling: kept in
+      * heavy compute ops: contractions and convolutions / pooling: kept in
         their own fused loop (with elementwise prologue / epilogue) and used as
         tiling anchors rather than propagation targets.
       * pack / unpack ops: layout changes that stay as materialization boundaries.
@@ -50,7 +41,7 @@ def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
 
 
 def has_barrier_ancestor(op: ir.Operation | ir.OpView) -> bool:
-    """Whether a fusion barrier is reachable backward through annotated producers.
+    """Check whether a fusion barrier is reachable backward through annotated producers.
 
     Used to tell an epilogue op (consumer of a barrier, e.g. a bias/relu after
     a matmul) apart from a pure prologue op (producer of a barrier, e.g. a fill).

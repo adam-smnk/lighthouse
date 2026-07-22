@@ -11,33 +11,20 @@ from lighthouse.utils.mlir import op_users
 
 class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roots"):
     """
-    Select the fusion roots among tile-size annotated ops, with GEMM barriers.
+    Select the fusion root of each group among tile-size annotated ops.
 
-    Given a set of candidate ops, return the root of each fusable group. A group
-    is a GEMM together with its elementwise prologue (producers, e.g. a fill) and
-    epilogue (consumers, e.g. a bias-add / relu). GEMMs act as barriers, so
-    consecutive GEMMs are kept in separate groups instead of being fused
-    together.
+    A group is a barrier op (e.g. a GEMM / pack) with its elementwise prologue
+    (producers, e.g. a fill) and epilogue (consumers, e.g. a bias-add / relu);
+    barriers are never fused together, so consecutive GEMMs stay in separate groups.
+    A consumer only joins the group when it tiles the shared tensor the same way.
+    An op whose annotation conflicts (e.g. 32x32 vs 64x64) or that was marked explicitly
+    as a boundary starts its own group.
 
-    The caller tiles each returned root and greedily fuses its producers into the
-    tiled loop, pulling exactly one group into a single loop. This relies on the
-    roots being processed top-down: once an upstream group has been fused it
-    blocks a downstream group from pulling it back in. The roots are therefore
-    returned in program (top-down) order (see `_in_program_order`).
-
-    An annotated op is a fusion root when its result does not feed another
-    elementwise op of the same group, i.e.:
-      * it has no annotated non-GEMM consumer of the same group (it is the end
-        of an elementwise chain, only feeding a GEMM barrier or a non-annotated
-        op), and
-      * it is not a pure prologue op feeding a GEMM (e.g. a fill): such ops are
-        fused as producers of the GEMM's root instead.
-
-    A consumer is only in the same group when it tiles the shared tensor the same
-    way (see `_same_group_consumer`): consumers marked as boundaries during
-    propagation, or whose annotation induces a conflicting tiling on the shared
-    tensor (e.g. hand-annotated 32x32 vs 64x64), start a separate group so their
-    own tiling is not overridden by fusion.
+    The root is a group's downstream terminal: an annotated op with no same-group
+    non-barrier consumer that is not itself a pure prologue feeding a barrier.
+    It is assumed that the caller tiles each root and greedily fuses its producers.
+    Roots are returned in program (top-down) order to help with greedy fusion. That is
+    fusing an upstream group first blocks a downstream one from pulling it back in.
 
     Args:
         target: Handle to candidate op(s) (e.g. all linalg ops).
@@ -57,13 +44,7 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
     def _same_group_consumer(
         producer: ir.Operation, shared: ir.Value, consumer: ir.Operation
     ) -> bool:
-        """Whether `consumer` shares `producer`'s fusion group across `shared`.
-
-        A consumer explicitly marked as a boundary during propagation is a fast
-        reject; otherwise the tilings both ops induce on the shared tensor are
-        compared, so ops annotated outside the framework (never seen by
-        propagation) are handled too. Barriers are classified by the caller.
-        """
+        """Check whether `consumer` shares `producer`'s fusion group across `shared` tensor."""
         if fa.is_fusion_boundary(consumer):
             return False
         return tp.compatible_on_value(
@@ -117,11 +98,8 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
         payload ops are ignored.
 
         Note: this is a workaround for `DominanceInfo` not being exposed in the
-        MLIR Python bindings. Ordering by dominance would be the natural choice;
-        it is only a partial order in general, but that is sufficient here since
-        a fusable group never spans control flow -- all roots share a single
-        block, where dominance and program order coincide. The pre-order walk
-        produces that same order directly.
+        MLIR Python bindings. Dominance information would be sufficient here
+        since a fusable group never spans control flow.
         """
         if not ops:
             return ops

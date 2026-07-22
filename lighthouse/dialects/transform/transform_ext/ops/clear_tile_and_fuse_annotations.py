@@ -13,9 +13,8 @@ class ClearTileAndFuseAnnotationsOp(
     """
     Remove the tile-and-fuse annotations from the target ops and their nested ops.
 
-    Clears the attributes left by tile-size assignment, propagation and fusion-group
-    selection. Each target op is walked, so passing a container handle (e.g. the
-    `scf.for` loops produced by fusion) clears the annotations of every op inside it.
+    Each target op is walked, so passing a container handle (e.g. the `scf.for` loops
+    produced by fusion) clears the annotations of every op inside it.
 
     Ops without the annotations are left untouched. The original `target` handle
     is returned for chaining.

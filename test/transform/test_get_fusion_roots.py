@@ -1,14 +1,5 @@
 # RUN: %PYTHON %s | FileCheck %s
 
-"""Dedicated tests for the get_fusion_roots transform op.
-
-These focus on the op in isolation (payloads are pre-annotated with
-`transform_ext.tile_sizes` so the tests do not depend on the assign / propagate
-passes) and print the returned roots handle with `transform.print`, which lists
-the payload ops in handle order. That makes the selection and, crucially, the
-ordering of the roots directly observable by FileCheck.
-"""
-
 from mlir import ir
 from mlir.dialects import transform
 from mlir.dialects.transform import structured
@@ -20,11 +11,7 @@ from lighthouse.schedule.builders import schedule_boilerplate
 
 
 def apply_schedule(payload_str, build_roots, name):
-    """Parse a payload, build a `get_fusion_roots` schedule and print the roots.
-
-    `build_roots(named_seq)` returns the roots handle; it is printed under
-    `name` so the resulting order is visible on stdout.
-    """
+    """Parse a payload, build a `get_fusion_roots` schedule and print the roots."""
     with ir.Context(), ir.Location.unknown():
         lh_dialects.register_and_load()
         payload = ir.Module.parse(payload_str)
@@ -124,11 +111,11 @@ module {
 }
 """
 
-# Two chained elementwise ops annotated (by hand, outside the framework) with
-# conflicting tile sizes: producer 32x32 -> consumer 64x64 sharing a tensor.
+# Two chained elementwise ops pre-annotated with conflicting tile sizes:
+#   producer 32x32 -> consumer 64x64 sharing a tensor.
 # Because the tilings conflict on the shared tensor, they are different groups:
-# both are roots (each is tiled on its own). With compatible sizes only the
-# downstream consumer would be a root (see COMPATIBLE_CHAIN).
+#   both are roots (each is tiled on its own).
+# With compatible sizes only the downstream consumer would be a root.
 INCOMPATIBLE_CHAIN = """
 #id = affine_map<(d0, d1) -> (d0, d1)>
 module {

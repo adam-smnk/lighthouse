@@ -1,11 +1,3 @@
-"""Tile-size propagation and compatibility helpers.
-
-Decide which ops may receive propagated tile sizes, translate tile sizes from one
-linalg op onto a neighbour that shares a tensor (mapping the sizes across both
-ops' indexing maps so the shared tensor is tiled consistently on either side),
-and decide whether two already-annotated ops tile a shared tensor compatibly.
-"""
-
 from collections.abc import Sequence
 
 from mlir import ir
@@ -21,7 +13,7 @@ from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as
 
 
 def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
-    """Whether tile sizes may be propagated onto this op.
+    """Check whether tile sizes may be propagated onto this op.
 
     True for any structured linalg op that is not a fusion barrier; non-linalg
     ops have no indexing maps to translate tiles through and are excluded.
@@ -32,13 +24,7 @@ def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
 def _map_for_value(
     op: ir.OpView, value: ir.Value, maps: Sequence[ir.AffineMap]
 ) -> ir.AffineMap | None:
-    """Return the indexing map associated with `value` on `op`.
-
-    `value` may be an input / output operand or a result of `op`. Inputs and
-    outputs are obtained via `linalg_inputs` / `linalg_outputs`, so this also
-    works for named linalg ops (broadcast, transpose, ...) that do not expose the
-    `.inputs` / `.outputs` accessors.
-    """
+    """Return the indexing map associated with `value` on `op`."""
     inputs = linalg_inputs(op)
     outputs = linalg_outputs(op)
     if inputs is None or outputs is None:
@@ -93,14 +79,12 @@ def compatible_on_value(
     dst_sizes: Sequence[int],
     shared: ir.Value,
 ) -> bool:
-    """Whether two ops tile a shared tensor compatibly.
+    """Check whether two ops tile a shared tensor compatibly.
 
     The tiles each op induces on `shared` are compared per tensor dimension. A
     dimension only conflicts when both ops tile it with *different* non-zero
     sizes; a zero (untiled / broadcast / unconstrained) side is a wildcard and
-    never conflicts. This keeps broadcasts fused -- matching FuseOp, which fuses
-    broadcast producers -- while still separating genuinely different tilings
-    (e.g. 32 vs 64 on the same dimension).
+    never conflicts.
 
     Returns True when the tiles cannot be determined, so grouping errs toward
     fusion rather than over-splitting.

@@ -76,12 +76,15 @@ def vectorize_innermost(ops):
     """
     with lh_transform.foreach(ops) as op:
         sizes = transform_ext.get_leading_unit_tile_sizes(op)
+        # Tiling with scf.forall as scf.for tiling API does not accept a single
+        # handle with all sizes.
+        # Ultimately, the behavior is the same. Leaving it as is for now.
         tiled = structured.TileUsingForallOp(op, tile_sizes=sizes).tiled_op
         structured.structured_vectorize(tiled, [])
         transform.yield_()
 
 
-def lower_packs_unpacks(tile_size: int = 32, leading_batch_dims: int = 0) -> ir.Module:
+def lower_packs_unpacks(tile_size: int = 32) -> ir.Module:
     """
     Lower pack and unpack ops into hardware-friendly, vectorized shapes.
 
@@ -91,20 +94,17 @@ def lower_packs_unpacks(tile_size: int = 32, leading_batch_dims: int = 0) -> ir.
     and innermost dim vectorized.
 
     Args:
-        tile_size: Retained for pipeline compatibility; the tiling is derived
-            from each op's pack structure.
-        leading_batch_dims: Retained for pipeline compatibility; batch dims are
-            handled by the per-op tiling.
+        tile_size: Target shape for sub-tiling pack and unpack ops' inner tiles
     Returns:
         Schedule
     """
     with schedule_boilerplate() as (schedule, named_seq):
         packs = lh_transform.match_op(named_seq.bodyTarget, "linalg.pack")
-        lower_packs(transform_ext.assign_tile_sizes(packs))
+        lower_packs(transform_ext.assign_tile_sizes(packs, tile_size=tile_size))
         lh_transform.cleanup(named_seq.bodyTarget)
 
         unpacks = lh_transform.match_op(named_seq.bodyTarget, "linalg.unpack")
-        lower_unpacks(transform_ext.assign_tile_sizes(unpacks))
+        lower_unpacks(transform_ext.assign_tile_sizes(unpacks, tile_size=tile_size))
 
         transposes = lh_transform.match_op(named_seq.bodyTarget, "linalg.transpose")
         vectorize_innermost(transposes)
