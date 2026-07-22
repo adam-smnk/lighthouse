@@ -1,15 +1,22 @@
-"""Tile-size propagation helpers.
+"""Tile-size propagation and compatibility helpers.
 
-Decide which ops may receive propagated tile sizes, and translate tile sizes from
-one linalg op onto a neighbour that shares a tensor, mapping the sizes across both
-ops' indexing maps so the shared tensor is tiled consistently on either side.
+Decide which ops may receive propagated tile sizes, translate tile sizes from one
+linalg op onto a neighbour that shares a tensor (mapping the sizes across both
+ops' indexing maps so the shared tensor is tiled consistently on either side),
+and decide whether two already-annotated ops tile a shared tensor compatibly.
 """
 
 from collections.abc import Sequence
 
 from mlir import ir
 
-from lighthouse.utils.mlir import opview, indexing_maps, dim_position
+from lighthouse.utils.mlir import (
+    opview,
+    indexing_maps,
+    dim_position,
+    linalg_inputs,
+    linalg_outputs,
+)
 from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
 
 
@@ -27,10 +34,15 @@ def _map_for_value(
 ) -> ir.AffineMap | None:
     """Return the indexing map associated with `value` on `op`.
 
-    `value` may be an input/output operand or a result of `op`.
+    `value` may be an input / output operand or a result of `op`. Inputs and
+    outputs are obtained via `linalg_inputs` / `linalg_outputs`, so this also
+    works for named linalg ops (broadcast, transpose, ...) that do not expose the
+    `.inputs` / `.outputs` accessors.
     """
-    inputs = list(op.inputs)
-    outputs = list(op.outputs)
+    inputs = linalg_inputs(op)
+    outputs = linalg_outputs(op)
+    if inputs is None or outputs is None:
+        return None
     for i, operand in enumerate(inputs):
         if operand == value:
             return maps[i]
@@ -42,6 +54,62 @@ def _map_for_value(
         if result == value:
             return maps[len(inputs) + r]
     return None
+
+
+def tiles_on_value(
+    op: ir.Operation | ir.OpView,
+    sizes: Sequence[int],
+    value: ir.Value,
+) -> list[int] | None:
+    """Per-dimension tiles that `op`, tiled by `sizes`, induces on `value`.
+
+    Returns one entry per dimension of `value` (tensor-dim order); 0 means the
+    dimension is left untiled / not constrained by `op`. Returns None when `op`
+    is not a structured linalg op or does not touch `value`.
+
+    Projecting both a producer's and a consumer's sizes onto the shared tensor
+    this way makes tile comparisons robust to transposition: differently ordered
+    iteration spaces still agree when they tile the shared tensor identically.
+    """
+    ov = opview(op)
+    maps = indexing_maps(ov)
+    if maps is None:
+        return None
+    value_map = _map_for_value(ov, value, maps)
+    if value_map is None:
+        return None
+    tiles = [0] * ir.ShapedType(value.type).rank
+    for tensor_dim, expr in enumerate(value_map.results):
+        pos = dim_position(expr)
+        if pos is not None and pos < len(sizes):
+            tiles[tensor_dim] = sizes[pos]
+    return tiles
+
+
+def compatible_on_value(
+    src_op: ir.Operation | ir.OpView,
+    src_sizes: Sequence[int],
+    dst_op: ir.Operation | ir.OpView,
+    dst_sizes: Sequence[int],
+    shared: ir.Value,
+) -> bool:
+    """Whether two ops tile a shared tensor compatibly.
+
+    The tiles each op induces on `shared` are compared per tensor dimension. A
+    dimension only conflicts when both ops tile it with *different* non-zero
+    sizes; a zero (untiled / broadcast / unconstrained) side is a wildcard and
+    never conflicts. This keeps broadcasts fused -- matching FuseOp, which fuses
+    broadcast producers -- while still separating genuinely different tilings
+    (e.g. 32 vs 64 on the same dimension).
+
+    Returns True when the tiles cannot be determined, so grouping errs toward
+    fusion rather than over-splitting.
+    """
+    a = tiles_on_value(src_op, src_sizes, shared)
+    b = tiles_on_value(dst_op, dst_sizes, shared)
+    if a is None or b is None:
+        return True
+    return all(x == y for x, y in zip(a, b) if x != 0 and y != 0)
 
 
 def propagate_through_value(
@@ -60,25 +128,17 @@ def propagate_through_value(
     src = opview(src_op)
     dst = opview(dst_op)
 
-    src_maps = indexing_maps(src)
     dst_maps = indexing_maps(dst)
-    if src_maps is None or dst_maps is None:
+    if dst_maps is None:
         return None
 
-    src_map = _map_for_value(src, shared, src_maps)
+    # Tile size per dimension of the shared tensor, as induced by the source.
+    tensor_tiles = tiles_on_value(src, src_sizes, shared)
     dst_map = _map_for_value(dst, shared, dst_maps)
-    if src_map is None or dst_map is None:
+    if tensor_tiles is None or dst_map is None:
         return None
 
-    # Tile size per dimension of the shared tensor.
-    shaped = ir.ShapedType(shared.type)
-    tensor_tiles = [0] * shaped.rank
-    for tensor_dim, expr in enumerate(src_map.results):
-        pos = dim_position(expr)
-        if pos is not None and pos < len(src_sizes):
-            tensor_tiles[tensor_dim] = src_sizes[pos]
-
-    if len(list(dst.outputs)) != 1:
+    if len(list(dst.results)) != 1:
         return None
     dst_out_map = dst_maps[-1]
     dst_parallel = {

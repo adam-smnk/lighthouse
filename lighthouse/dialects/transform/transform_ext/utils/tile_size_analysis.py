@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from mlir import ir
 from mlir.dialects import linalg
 
-from lighthouse.utils.mlir import opview, indexing_maps, dim_position
+from lighthouse.utils.mlir import opview, indexing_maps, dim_position, linalg_outputs
 
 # Attribute used to annotate payload ops with their target tile sizes
 # (one entry per iteration dimension, in loop order).
@@ -44,7 +44,7 @@ def _disable_small_tiles(
     Tiling a dimension that is smaller than the tile size only adds loop
     overhead, so such dimensions are left untiled (size 0).
     """
-    out_type = ir.ShapedType(list(op.outputs)[0].type)
+    out_type = ir.ShapedType(linalg_outputs(op)[0].type)
     iter_to_tensor = _output_tensor_dim_of_iter_dim(out_map)
     for iter_dim, tensor_dim in iter_to_tensor.items():
         if sizes[iter_dim] <= 1:
@@ -91,7 +91,7 @@ def compute_tile_sizes(
     if maps is None:
         return None
     # Only single-output ops are supported for now.
-    if len(list(ov.outputs)) != 1:
+    if len(linalg_outputs(ov)) != 1:
         return None
 
     # The output operand's map is the last one (inputs first, then outputs).

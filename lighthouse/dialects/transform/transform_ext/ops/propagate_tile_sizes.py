@@ -5,6 +5,7 @@ from mlir.dialects.transform import DiagnosedSilenceableFailure
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 from lighthouse.dialects.transform.transform_ext.utils import tile_propagation as tp
+from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
 from lighthouse.utils.mlir import op_users, defining_op
 
 
@@ -68,7 +69,18 @@ class PropagateTileSizesOp(
             def claim(
                 src: ir.Operation, src_sizes, shared: ir.Value, dst: ir.Operation
             ) -> ir.Operation | None:
-                if tsa.get_tile_sizes_attr(dst) is not None:
+                dst_sizes = tsa.get_tile_sizes_attr(dst)
+                if dst_sizes is not None:
+                    # `dst` already carries a tiling. If it disagrees with `src`
+                    # on how the shared tensor is tiled, they belong to different
+                    # fusion groups; mark the consumer side (the op reading the
+                    # shared tensor) as a boundary so grouping can split them
+                    # cheaply without recomputing compatibility.
+                    if not tp.compatible_on_value(
+                        src, src_sizes, dst, dst_sizes, shared
+                    ):
+                        consumer = src if any(r == shared for r in dst.results) else dst
+                        fa.mark_fusion_boundary(consumer)
                     return None
                 if not tp.is_propagatable(dst):
                     return None

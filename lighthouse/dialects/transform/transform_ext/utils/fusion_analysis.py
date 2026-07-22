@@ -10,6 +10,22 @@ from mlir.dialects import linalg
 from lighthouse.utils.mlir import opview, defining_op
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 
+# Marks an op as the start of a new fusion group: its tile-size annotation was
+# found (during propagation) to conflict with an annotated producer, so the two
+# are kept in separate groups. Recorded so grouping stays cheap; grouping also
+# recomputes compatibility, so this is an optimisation rather than a requirement.
+FUSION_BOUNDARY_ATTR_NAME = "transform_ext.fusion_boundary"
+
+
+def is_fusion_boundary(op: ir.Operation | ir.OpView) -> bool:
+    """Whether the op is marked as a fusion-group boundary (new group start)."""
+    return FUSION_BOUNDARY_ATTR_NAME in opview(op).operation.attributes
+
+
+def mark_fusion_boundary(op: ir.Operation | ir.OpView) -> None:
+    """Mark the op as a fusion-group boundary (the start of a new group)."""
+    opview(op).operation.attributes[FUSION_BOUNDARY_ATTR_NAME] = ir.UnitAttr.get()
+
 
 def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
     """Whether the op acts as a fusion barrier (groups are not fused across it).

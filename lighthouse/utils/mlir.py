@@ -225,6 +225,37 @@ def num_loops(op: ir.Operation | ir.OpView) -> int | None:
     return maps[0].n_dims
 
 
+def linalg_inputs(op: ir.Operation | ir.OpView) -> list[ir.Value] | None:
+    """Return the input (``ins``) operands of a structured linalg op.
+
+    Works for every structured linalg op, including named ops (broadcast,
+    transpose, ...) that do not expose the ``.inputs`` accessor: the operands of
+    a structured linalg op are its inputs followed by its outputs (DPS inits),
+    and each output is tied to one result, so the inputs are the leading
+    operands. Returns None when the op is not a structured linalg op.
+    """
+    ov = opview(op)
+    if indexing_maps(ov) is None:
+        return None
+    operands = list(ov.operands)
+    return operands[: len(operands) - len(list(ov.results))]
+
+
+def linalg_outputs(op: ir.Operation | ir.OpView) -> list[ir.Value] | None:
+    """Return the output (``outs`` / init) operands of a structured linalg op.
+
+    Works for every structured linalg op, including named ops (broadcast,
+    transpose, ...) that do not expose the ``.outputs`` accessor. The outputs are
+    the trailing operands, one per result (see `linalg_inputs`). Returns None
+    when the op is not a structured linalg op.
+    """
+    ov = opview(op)
+    if indexing_maps(ov) is None:
+        return None
+    operands = list(ov.operands)
+    return operands[len(operands) - len(list(ov.results)) :]
+
+
 def op_users(value: ir.Value) -> list[ir.Operation]:
     """Return the ops that use `value`."""
     users = []

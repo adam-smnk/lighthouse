@@ -319,6 +319,128 @@ module {
 """
 
 
+# Two chained elementwise ops hand-annotated (outside the framework) with
+# conflicting tile sizes: producer 32x32 -> consumer 64x64. Their tilings
+# disagree on the shared tensor, so they are separate groups and must not be
+# fused into one loop.
+INCOMPAT_SPLIT = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<128x128xf32>
+    %p = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%a: tensor<128x128xf32>) outs(%e0: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %e = math.exp %i : f32
+      linalg.yield %e : f32
+    } -> tensor<128x128xf32>
+    %e1 = tensor.empty() : tensor<128x128xf32>
+    %c = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 64, 64>} ins(%p: tensor<128x128xf32>) outs(%e1: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %s = math.sqrt %i : f32
+      linalg.yield %s : f32
+    } -> tensor<128x128xf32>
+    return %c : tensor<128x128xf32>
+  }
+}
+"""
+
+# A chain whose downstream op is pre-annotated (outside the framework) with a
+# conflicting tile size (64x64). Assigning + propagating from the upstream op
+# (32x32) reaches the pre-annotated op and records a fusion boundary on it, so
+# grouping keeps the two apart cheaply.
+PRE_ANNOTATED = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<128x128xf32>
+    %p = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"]} ins(%a: tensor<128x128xf32>) outs(%e0: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %e = math.exp %i : f32
+      linalg.yield %e : f32
+    } -> tensor<128x128xf32>
+    %e1 = tensor.empty() : tensor<128x128xf32>
+    %c = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 64, 64>} ins(%p: tensor<128x128xf32>) outs(%e1: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %s = math.sqrt %i : f32
+      linalg.yield %s : f32
+    } -> tensor<128x128xf32>
+    return %c : tensor<128x128xf32>
+  }
+}
+"""
+
+# A broadcasting generic (bias[128] -> [64x128], input map drops the leading dim)
+# feeding a relu. Broadcasts are beneficial to fuse and FuseOp handles them, so
+# the leniency for untiled/broadcast dims in the compatibility check must keep
+# the broadcast fused with its consumer in a single loop.
+BROADCAST = """
+#bc_in = affine_map<(d0, d1) -> (d1)>
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%bias: tensor<128xf32>) -> tensor<64x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<64x128xf32>
+    %bc = linalg.generic {indexing_maps=[#bc_in, #id], iterator_types=["parallel","parallel"]} ins(%bias: tensor<128xf32>) outs(%e0: tensor<64x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      linalg.yield %i : f32
+    } -> tensor<64x128xf32>
+    %e1 = tensor.empty() : tensor<64x128xf32>
+    %relu = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"]} ins(%bc: tensor<64x128xf32>) outs(%e1: tensor<64x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<64x128xf32>
+    return %relu : tensor<64x128xf32>
+  }
+}
+"""
+
+# Named linalg ops (broadcast, transpose) do not expose the .inputs / .outputs
+# accessors, only .input / .init. Selecting / computing / propagating tile sizes
+# must go through linalg_inputs / linalg_outputs so these ops do not crash the
+# analysis: bias[128] --broadcast--> relu --transpose.
+NAMED_BROADCAST_TRANSPOSE = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%bias: tensor<128xf32>) -> tensor<128x64xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<64x128xf32>
+    %bc = linalg.broadcast ins(%bias: tensor<128xf32>) outs(%e0: tensor<64x128xf32>) dimensions = [0]
+    %e1 = tensor.empty() : tensor<64x128xf32>
+    %relu = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"]} ins(%bc: tensor<64x128xf32>) outs(%e1: tensor<64x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<64x128xf32>
+    %e2 = tensor.empty() : tensor<128x64xf32>
+    %t = linalg.transpose ins(%relu: tensor<64x128xf32>) outs(%e2: tensor<128x64xf32>) permutation = [1, 0]
+    return %t : tensor<128x64xf32>
+  }
+}
+"""
+
+# A GEMM anchor whose result feeds a named linalg.transpose: tile sizes propagate
+# from the matmul onto the named op, so propagation (propagate_through_value ->
+# _map_for_value) must handle a named op without crashing.
+GEMM_NAMED_TRANSPOSE = """
+module {
+  func.func @main(%a: tensor<64x64xf32>, %w: tensor<64x64xf32>) -> tensor<64x64xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<64x64xf32>
+    %f = linalg.fill ins(%cst: f32) outs(%e: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mm = linalg.matmul ins(%a, %w: tensor<64x64xf32>, tensor<64x64xf32>) outs(%f: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %e2 = tensor.empty() : tensor<64x64xf32>
+    %t = linalg.transpose ins(%mm: tensor<64x64xf32>) outs(%e2: tensor<64x64xf32>) permutation = [1, 0]
+    return %t : tensor<64x64xf32>
+  }
+}
+"""
+
+
 # A GEMM anchors tiling; its tile sizes are propagated to the fill producer and
 # the elementwise (bias, relu) consumers, then the whole group is fused.
 # CHECK-LABEL: Test: mlp_assign_propagate
@@ -484,3 +606,77 @@ run("permuted_propagation", PERMUTED, assign_gemm)
 # CHECK: scf.forall.in_parallel
 # CHECK: linalg.unpack
 run("pack_unpack_barrier", PACK_UNPACK, assign_elementwise, tile_and_fuse)
+
+
+# Conflicting hand-annotated tile sizes (32x32 producer, 64x64 consumer) are kept
+# apart: each op is tiled in its own scf.forall (32-step and 64-step), and the
+# second loop reads the first loop's result through a slice -- they are not fused.
+# CHECK-LABEL: Test: incompatible_annotations_split
+# CHECK: %[[L0:.+]] = scf.forall ({{.*}}) = (0, 0) to (128, 128) step (32, 32)
+# CHECK: math.exp
+# CHECK: scf.forall.in_parallel
+# CHECK: scf.forall ({{.*}}) = (0, 0) to (128, 128) step (64, 64)
+# CHECK: tensor.extract_slice %[[L0]]
+# CHECK: math.sqrt
+# CHECK: scf.forall.in_parallel
+run("incompatible_annotations_split", INCOMPAT_SPLIT, tile_and_fuse)
+
+
+# A downstream op pre-annotated (64x64) conflicts with the propagated tiling
+# (32x32). Propagation records the split by marking the conflicting op with a
+# transform_ext.fusion_boundary attribute.
+# CHECK-LABEL: Test: boundary_marked_during_propagation
+# CHECK: tile_sizes = array<i64: 32, 32>
+# CHECK: transform_ext.fusion_boundary
+# CHECK-SAME: tile_sizes = array<i64: 64, 64>
+run("boundary_marked_during_propagation", PRE_ANNOTATED, assign_elementwise)
+
+
+# The pre-annotated conflict is honored end-to-end: the two ops are tiled into
+# separate loops (32-step then 64-step) rather than fused.
+# CHECK-LABEL: Test: boundary_split_tile_and_fuse
+# CHECK: %[[B0:.+]] = scf.forall ({{.*}}) step (32, 32)
+# CHECK: math.exp
+# CHECK: scf.forall.in_parallel
+# CHECK: scf.forall ({{.*}}) step (64, 64)
+# CHECK: tensor.extract_slice %[[B0]]
+# CHECK: math.sqrt
+# CHECK: scf.forall.in_parallel
+run("boundary_split_tile_and_fuse", PRE_ANNOTATED, assign_elementwise, tile_and_fuse)
+
+
+# A broadcasting generic producer stays fused with its consumer: both land in a
+# single scf.forall (the broadcast reads a 1D slice of the bias), consistent with
+# FuseOp fusing broadcast producers. The untiled/broadcast dim is treated as a
+# wildcard by the compatibility check, so it never forces a split.
+# CHECK-LABEL: Test: broadcast_stays_fused
+# CHECK: scf.forall ({{.*}}) = (0, 0) to (64, 128) step (32, 32)
+# CHECK: tensor.extract_slice %arg0[%{{.*}}] [32] [1]
+# CHECK: linalg.generic
+# CHECK: linalg.generic
+# CHECK: scf.forall.in_parallel
+# CHECK-NOT: scf.forall
+run("broadcast_stays_fused", BROADCAST, assign_elementwise, tile_and_fuse)
+
+
+# Named linalg ops (broadcast, transpose) lack the .inputs / .outputs accessors,
+# so selecting and computing their tile sizes must go through the linalg_inputs /
+# linalg_outputs helpers. All three ops (broadcast, generic, transpose) are
+# elementwise and are annotated without crashing.
+# CHECK-LABEL: Test: named_broadcast_transpose_anchor
+# CHECK: linalg.broadcast
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+# CHECK: linalg.transpose
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("named_broadcast_transpose_anchor", NAMED_BROADCAST_TRANSPOSE, assign_elementwise)
+
+
+# Propagation onto a named op: the matmul's tiles are propagated to the named
+# transpose consumer via _map_for_value, which must not crash on a named op.
+# CHECK-LABEL: Test: gemm_named_transpose_propagate
+# CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+# CHECK: linalg.transpose
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("gemm_named_transpose_propagate", GEMM_NAMED_TRANSPOSE, assign_gemm)

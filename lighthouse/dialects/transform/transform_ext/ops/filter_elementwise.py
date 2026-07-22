@@ -3,7 +3,7 @@ from mlir.dialects import ext, transform, linalg
 from mlir.dialects.transform import DiagnosedSilenceableFailure
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
-from lighthouse.utils.mlir import indexing_maps
+from lighthouse.utils.mlir import indexing_maps, linalg_inputs
 
 
 def _all_loops_parallel(op: ir.OpView) -> bool:
@@ -33,7 +33,7 @@ def is_elementwise(op: ir.Operation | ir.OpView) -> bool:
         return False
     if not all(m.is_projected_permutation for m in maps):
         return False
-    num_inputs = len(list(ov.inputs))
+    num_inputs = len(linalg_inputs(ov))
     return all(m.is_permutation for m in maps[num_inputs:])
 
 

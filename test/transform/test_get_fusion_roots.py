@@ -98,6 +98,57 @@ module {
 }
 """
 
+# Two chained elementwise ops annotated (by hand, outside the framework) with
+# conflicting tile sizes: producer 32x32 -> consumer 64x64 sharing a tensor.
+# Because the tilings conflict on the shared tensor, they are different groups:
+# both are roots (each is tiled on its own). With compatible sizes only the
+# downstream consumer would be a root (see COMPATIBLE_CHAIN).
+INCOMPATIBLE_CHAIN = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<128x128xf32>
+    %p = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%a: tensor<128x128xf32>) outs(%e0: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %e = math.exp %i : f32
+      linalg.yield %e : f32
+    } -> tensor<128x128xf32>
+    %e1 = tensor.empty() : tensor<128x128xf32>
+    %c = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 64, 64>} ins(%p: tensor<128x128xf32>) outs(%e1: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %s = math.sqrt %i : f32
+      linalg.yield %s : f32
+    } -> tensor<128x128xf32>
+    return %c : tensor<128x128xf32>
+  }
+}
+"""
+
+# The same chain with matching tile sizes (both 32x32): the two ops form a single
+# group, so only the downstream consumer (the sqrt) is a root.
+COMPATIBLE_CHAIN = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<128x128xf32>) -> tensor<128x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %e0 = tensor.empty() : tensor<128x128xf32>
+    %p = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%a: tensor<128x128xf32>) outs(%e0: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %e = math.exp %i : f32
+      linalg.yield %e : f32
+    } -> tensor<128x128xf32>
+    %e1 = tensor.empty() : tensor<128x128xf32>
+    %c = linalg.generic {indexing_maps=[#id,#id], iterator_types=["parallel","parallel"], transform_ext.tile_sizes = array<i64: 32, 32>} ins(%p: tensor<128x128xf32>) outs(%e1: tensor<128x128xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %s = math.sqrt %i : f32
+      linalg.yield %s : f32
+    } -> tensor<128x128xf32>
+    return %c : tensor<128x128xf32>
+  }
+}
+"""
+
 
 def scrambled_roots(named_seq):
     # Match the two op kinds separately and merge them: the handle lists all
@@ -141,3 +192,21 @@ apply_schedule(GEMM_GROUP, all_linalg_roots, "GEMM_GROUP")
 # CHECK: linalg.matmul
 # CHECK-NOT: linalg.fill
 apply_schedule(BARRIER_ONLY, all_linalg_roots, "BARRIER_ONLY")
+
+
+# Conflicting hand-annotated tile sizes split the chain: the producer (32x32) and
+# the consumer (64x64) are separate groups, so both are returned as roots, in
+# program order (producer first).
+# CHECK: IR printer: INCOMPATIBLE_CHAIN
+# CHECK: tile_sizes = array<i64: 32, 32>
+# CHECK: tile_sizes = array<i64: 64, 64>
+apply_schedule(INCOMPATIBLE_CHAIN, all_linalg_roots, "INCOMPATIBLE_CHAIN")
+
+
+# Matching tile sizes keep the chain in one group: only the downstream consumer
+# (sqrt) is a root; the producer (exp) is fused as its producer, so it is not
+# printed.
+# CHECK: IR printer: COMPATIBLE_CHAIN
+# CHECK-NOT: math.exp
+# CHECK: math.sqrt
+apply_schedule(COMPATIBLE_CHAIN, all_linalg_roots, "COMPATIBLE_CHAIN")

@@ -5,6 +5,7 @@ from mlir.dialects.transform import DiagnosedSilenceableFailure
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
+from lighthouse.dialects.transform.transform_ext.utils import tile_propagation as tp
 from lighthouse.utils.mlir import op_users
 
 
@@ -26,10 +27,17 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
 
     An annotated op is a fusion root when its result does not feed another
     elementwise op of the same group, i.e.:
-      * it has no annotated non-GEMM consumer (it is the end of an elementwise
-        chain, only feeding a GEMM barrier or a non-annotated op), and
+      * it has no annotated non-GEMM consumer of the same group (it is the end
+        of an elementwise chain, only feeding a GEMM barrier or a non-annotated
+        op), and
       * it is not a pure prologue op feeding a GEMM (e.g. a fill): such ops are
         fused as producers of the GEMM's root instead.
+
+    A consumer is only in the same group when it tiles the shared tensor the same
+    way (see `_same_group_consumer`): consumers marked as boundaries during
+    propagation, or whose annotation induces a conflicting tiling on the shared
+    tensor (e.g. hand-annotated 32x32 vs 64x64), start a separate group so their
+    own tiling is not overridden by fusion.
 
     Args:
         target: Handle to candidate op(s) (e.g. all linalg ops).
@@ -46,15 +54,43 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
         cls.MemoryEffectsOpInterfaceModel.attach(cls.OPERATION_NAME, context=ctx)
 
     @staticmethod
+    def _same_group_consumer(
+        producer: ir.Operation, shared: ir.Value, consumer: ir.Operation
+    ) -> bool:
+        """Whether `consumer` shares `producer`'s fusion group across `shared`.
+
+        A consumer explicitly marked as a boundary during propagation is a fast
+        reject; otherwise the tilings both ops induce on the shared tensor are
+        compared, so ops annotated outside the framework (never seen by
+        propagation) are handled too. Barriers are classified by the caller.
+        """
+        if fa.is_fusion_boundary(consumer):
+            return False
+        return tp.compatible_on_value(
+            producer,
+            tsa.get_tile_sizes_attr(producer),
+            consumer,
+            tsa.get_tile_sizes_attr(consumer),
+            shared,
+        )
+
+    @staticmethod
     def _is_fusion_root(target_op: ir.Operation) -> bool:
         annotated_consumers = [
-            user
+            (result, user)
             for result in target_op.opview.results
             for user in op_users(result)
             if tsa.get_tile_sizes_attr(user) is not None
         ]
-        # End of an elementwise chain: no annotated non-barrier consumer.
-        if any(not fa.is_fusion_barrier(user) for user in annotated_consumers):
+        # Still inside its own elementwise chain: a non-barrier consumer that
+        # shares this op's tiling (compatible and not marked as a boundary) is
+        # downstream in the same group, so this op is not the group's root. A
+        # consumer with a conflicting tiling is a different group and is ignored.
+        if any(
+            not fa.is_fusion_barrier(user)
+            and GetFusionRootsOp._same_group_consumer(target_op, result, user)
+            for result, user in annotated_consumers
+        ):
             return False
         # A fusion barrier (e.g. a GEMM) with no elementwise epilogue is its own root.
         if fa.is_fusion_barrier(target_op):
@@ -64,9 +100,10 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
             return True
         # A pure prologue op feeding a barrier (e.g. a fill) is fused as a
         # producer of the barrier's root, not on its own.
-        if annotated_consumers:
+        if any(fa.is_fusion_barrier(user) for _, user in annotated_consumers):
             return False
-        # A terminal op of a barrier-free elementwise group.
+        # A terminal op of a barrier-free group (or one that only feeds a
+        # different group across a boundary) is its own root.
         return True
 
     @staticmethod
