@@ -37,8 +37,24 @@ def assign_elementwise():
     return tf.assign_elementwise_tile_sizes(tile_size=32)
 
 
+def assign_elementwise64():
+    return tf.assign_elementwise_tile_sizes(tile_size=64)
+
+
 def tile_and_fuse():
     return tf.tile_and_fuse_annotated()
+
+
+def tile_and_fuse_keep():
+    # Opt out of post-fusion annotation clearing so a test can still inspect the
+    # propagated tile sizes on the fused ops.
+    return tf.tile_and_fuse_annotated(clear_annotations=False)
+
+
+def tile_and_fuse_for():
+    # Tile with sequential scf.for loops (a nested loop nest) instead of a single
+    # multi-dim scf.forall.
+    return tf.tile_and_fuse_annotated(use_forall=False)
 
 
 MLP = """
@@ -571,7 +587,8 @@ run("high_dim_contract", HIGH_DIM_CONTRACT, assign_gemm)
 
 # 1D results: the matvec's single parallel (M) dim is tiled with the full tile
 # size (its reduction K stays untiled) under the default DEFAULT_PARALLEL_TILE_DIMS,
-# and the group fuses into a single 1D scf.forall.
+# and the group fuses into a single 1D scf.forall. Uses tile_and_fuse_keep so the
+# propagated tile sizes remain observable on the fused ops.
 # CHECK-LABEL: Test: matvec_1d_tile_and_fuse
 # CHECK: scf.forall ({{.*}}) = (0) to (128) step (32)
 # CHECK: linalg.fill
@@ -581,7 +598,7 @@ run("high_dim_contract", HIGH_DIM_CONTRACT, assign_gemm)
 # CHECK: linalg.generic
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 32>
 # CHECK: scf.forall.in_parallel
-run("matvec_1d_tile_and_fuse", MATVEC, assign_gemm, tile_and_fuse)
+run("matvec_1d_tile_and_fuse", MATVEC, assign_gemm, tile_and_fuse_keep)
 
 
 # Propagation across a permuted (transposed) shared tensor: the batch matmul is
@@ -680,3 +697,68 @@ run("named_broadcast_transpose_anchor", NAMED_BROADCAST_TRANSPOSE, assign_elemen
 # CHECK: linalg.transpose
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
 run("gemm_named_transpose_propagate", GEMM_NAMED_TRANSPOSE, assign_gemm)
+
+
+# A larger elementwise payload for demonstrating repeated tiling rounds.
+RETILE = """
+#map = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<128x256xf32>) -> tensor<128x256xf32> {
+    %0 = tensor.empty() : tensor<128x256xf32>
+    %1 = linalg.generic {indexing_maps=[#map,#map], iterator_types=["parallel","parallel"]} ins(%a: tensor<128x256xf32>) outs(%0: tensor<128x256xf32>) {
+    ^bb0(%in: f32, %o: f32):
+      %e = math.exp %in : f32
+      linalg.yield %e : f32
+    } -> tensor<128x256xf32>
+    return %1 : tensor<128x256xf32>
+  }
+}
+"""
+
+
+# Fusion consumes the annotations, so by default they are cleared from the ops
+# now inside the generated loop, leaving no stale `transform_ext.*` attributes.
+# CHECK-LABEL: Test: clears_annotations_after_fuse
+# CHECK: scf.forall
+# CHECK-NOT: transform_ext.tile_sizes
+# CHECK-NOT: transform_ext.fusion_boundary
+# CHECK: scf.forall.in_parallel
+run("clears_annotations_after_fuse", MLP, assign_gemm, tile_and_fuse)
+
+
+# Clearing the annotations after each round leaves a clean slate, so a second
+# assign + tile-and-fuse round tiles the already-tiled ops again: a 64-wide outer
+# loop from round one, a 32-wide inner loop from round two, and no leftover
+# annotations that could confuse the second assignment.
+# CHECK-LABEL: Test: retile_after_clear
+# CHECK: scf.forall ({{.*}}) = (0, 0) to (128, 256) step (64, 64)
+# CHECK: scf.forall ({{.*}}) = (0, 0) to (64, 64) step (32, 32)
+# CHECK-NOT: transform_ext.tile_sizes
+# CHECK-NOT: transform_ext.fusion_boundary
+# CHECK: scf.forall.in_parallel
+run(
+    "retile_after_clear",
+    RETILE,
+    assign_elementwise64,
+    tile_and_fuse,
+    assign_elementwise,
+    tile_and_fuse,
+)
+
+
+# Non-forall tiling: the elementwise chain tiled with use_forall=False produces
+# two NESTED scf.for loops instead of one scf.forall. Both ops are fused into the
+# innermost loop, and post-fusion clearing must still reach them -- the fusion
+# loop handle covers the whole nest -- so no stale annotations remain anywhere in
+# the loop nest.
+# CHECK-LABEL: Test: elementwise_scf_for_nested_clears
+# CHECK: scf.for
+# CHECK-NOT: transform_ext
+# CHECK: scf.for
+# CHECK-NOT: transform_ext
+# CHECK: math.exp
+# CHECK-NOT: transform_ext
+# CHECK: arith.select
+# CHECK-NOT: transform_ext
+# CHECK: scf.yield
+run("elementwise_scf_for_nested_clears", ELTWISE, assign_elementwise, tile_and_fuse_for)

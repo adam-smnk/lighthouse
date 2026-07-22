@@ -90,6 +90,7 @@ def assign_elementwise_tile_sizes(tile_size: int = 32) -> ir.Module:
 def tile_and_fuse_annotated(
     target_op: str | list[str] | None = None,
     use_forall: bool = True,
+    clear_annotations: bool = True,
 ) -> ir.Module:
     """
     Tile and fuse annotated groups using their tile-size annotations.
@@ -102,6 +103,7 @@ def tile_and_fuse_annotated(
     Args:
         target_op: Candidate op(s) to consider. Defaults to all linalg ops.
         use_forall: Generate `scf.forall` loops (parallel) when tiling.
+        clear_annotations: Clear the annotations from the fused ops.
     Returns:
         Schedule module.
     """
@@ -113,12 +115,17 @@ def tile_and_fuse_annotated(
         roots = transform_ext.get_fusion_roots(candidates)
         with lh_transform.foreach(roots) as op:
             tiles = transform_ext.get_tile_sizes(op)
-            structured.FuseOp(
+            fused = structured.FuseOp(
                 op,
                 tile_sizes=tiles,
                 apply_cleanup=True,
                 use_forall=use_forall,
             )
+            # Fusion has consumed the annotations of this group. Clear them from
+            # the ops now inside the generated loop(s).
+            if clear_annotations:
+                loops = transform.merge_handles(list(fused.loops))
+                transform_ext.clear_tile_and_fuse_annotations(loops)
             transform.yield_()
         lh_transform.cleanup(named_seq.bodyTarget)
         transform.yield_()

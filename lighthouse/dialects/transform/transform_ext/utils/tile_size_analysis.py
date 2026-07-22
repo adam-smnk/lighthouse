@@ -126,3 +126,10 @@ def set_tile_sizes_attr(op: ir.Operation | ir.OpView, sizes: Sequence[int]) -> N
     """Annotate an op with its target tile sizes."""
     operation = opview(op).operation
     operation.attributes[TILE_SIZES_ATTR_NAME] = ir.DenseI64ArrayAttr.get(list(sizes))
+
+
+def clear_tile_sizes_attr(op: ir.Operation | ir.OpView) -> None:
+    """Remove the tile-size annotation from an op, if present."""
+    attrs = opview(op).operation.attributes
+    if TILE_SIZES_ATTR_NAME in attrs:
+        del attrs[TILE_SIZES_ATTR_NAME]

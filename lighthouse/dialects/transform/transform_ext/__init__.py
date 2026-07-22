@@ -3,6 +3,7 @@ from .dialect import TransformExtensionDialect
 
 from .ops.wrap_in_benching_func import wrap_in_benching_func
 from .ops.assign_tile_sizes import assign_tile_sizes
+from .ops.clear_tile_and_fuse_annotations import clear_tile_and_fuse_annotations
 from .ops.get_named_attribute import get_named_attribute
 from .ops.get_fusion_roots import get_fusion_roots
 from .ops.get_tile_sizes import get_tile_sizes
@@ -23,6 +24,7 @@ from .ops.move_offsets_to_subview import move_offsets_to_subview
 __all__ = [
     "TransformExtensionDialect",
     "assign_tile_sizes",
+    "clear_tile_and_fuse_annotations",
     "convert_func_results_to_args",
     "extract_handle",
     "filter_elementwise",

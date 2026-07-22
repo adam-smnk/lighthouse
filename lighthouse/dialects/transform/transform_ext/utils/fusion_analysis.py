@@ -27,6 +27,13 @@ def mark_fusion_boundary(op: ir.Operation | ir.OpView) -> None:
     opview(op).operation.attributes[FUSION_BOUNDARY_ATTR_NAME] = ir.UnitAttr.get()
 
 
+def clear_fusion_boundary(op: ir.Operation | ir.OpView) -> None:
+    """Remove the fusion-group boundary marker from an op, if present."""
+    attrs = opview(op).operation.attributes
+    if FUSION_BOUNDARY_ATTR_NAME in attrs:
+        del attrs[FUSION_BOUNDARY_ATTR_NAME]
+
+
 def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
     """Whether the op acts as a fusion barrier (groups are not fused across it).
 
