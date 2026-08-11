@@ -39,6 +39,14 @@ def assign_register_parallel():
     )
 
 
+def assign_register_reduction():
+    return tf.assign_and_propagate_tile_sizes(
+        tile_size=32,
+        strategy="register_reduction",
+        propagate=False,
+    )
+
+
 def assign_register_parallel_auto_amx():
     return tf.assign_and_propagate_tile_sizes(
         tile_size=32,
@@ -48,6 +56,10 @@ def assign_register_parallel_auto_amx():
 
 def tile_and_fuse_keep():
     return tf.tile_and_fuse_annotated(clear_annotations=False)
+
+
+def tile_reduction_batch_only():
+    return tf.tile_annotated(target_op="linalg.batch_matmul", clear_annotations=False)
 
 
 MLP = """
@@ -84,6 +96,20 @@ module {
 """
 
 
+BMM = """
+module {
+  func.func @main(%a: tensor<8x64x96xf32>, %b: tensor<8x96x128xf32>) -> tensor<8x64x128xf32> {
+    %cst = arith.constant 0.0 : f32
+    %0 = tensor.empty() : tensor<8x64x128xf32>
+    %1 = linalg.fill ins(%cst: f32) outs(%0: tensor<8x64x128xf32>) -> tensor<8x64x128xf32>
+    %2 = linalg.batch_matmul ins(%a, %b : tensor<8x64x96xf32>, tensor<8x96x128xf32>)
+        outs(%1 : tensor<8x64x128xf32>) -> tensor<8x64x128xf32>
+    return %2 : tensor<8x64x128xf32>
+  }
+}
+"""
+
+
 # CHECK-LABEL: Test: register_parallel_tile_and_fuse
 # CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 8, 32, 0>}
 # CHECK: linalg.generic
@@ -104,4 +130,16 @@ run_with_target_override(
     MLP,
     features=["amx_tile"],
     schedules=(assign_register_parallel_auto_amx, tile_and_fuse_keep),
+)
+
+
+# Register-reduction strategy can be applied independently.
+# CHECK-LABEL: Test: register_reduction_tile_only
+# CHECK: scf.for
+# CHECK: linalg.batch_matmul {transform_ext.tile_sizes = array<i64: 0, 0, 0, 2>}
+run(
+    "register_reduction_tile_only",
+    BMM,
+    assign_register_reduction,
+    tile_reduction_batch_only,
 )
