@@ -1,6 +1,7 @@
 from mlir import ir
 from mlir.dialects import ext, transform
 from mlir.dialects.transform import DiagnosedSilenceableFailure
+from collections import deque
 
 from lighthouse.dialects.transform.transform_ext import TransformExtensionDialect
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
@@ -67,7 +68,11 @@ class PropagateTileSizesOp(
                     annotated.append(target_op)
 
             def claim(
-                src: ir.Operation, src_sizes, shared: ir.Value, dst: ir.Operation
+                src: ir.Operation,
+                src_sizes,
+                src_shared: ir.Value,
+                dst_shared: ir.Value,
+                dst: ir.Operation,
             ) -> ir.Operation | None:
                 dst_sizes = tsa.get_tile_sizes_attr(dst)
                 if dst_sizes is not None:
@@ -76,20 +81,160 @@ class PropagateTileSizesOp(
                     # fusion groups; mark the consumer side (the op reading the
                     # shared tensor) as a boundary so grouping can split them
                     # cheaply without recomputing compatibility.
-                    if not tp.compatible_on_value(
-                        src, src_sizes, dst, dst_sizes, shared
+                    if not tp.compatible_on_values(
+                        src,
+                        src_sizes,
+                        src_shared,
+                        dst,
+                        dst_sizes,
+                        dst_shared,
                     ):
-                        consumer = src if any(r == shared for r in dst.results) else dst
+                        consumer = (
+                            src if any(r == dst_shared for r in dst.results) else dst
+                        )
                         fa.mark_fusion_boundary(consumer)
                     return None
                 if not tp.is_propagatable(dst):
                     return None
-                dst_sizes = tp.propagate_through_value(src, src_sizes, shared, dst)
+                dst_sizes = tp.propagate_through_values(
+                    src,
+                    src_sizes,
+                    src_shared,
+                    dst_shared,
+                    dst,
+                )
                 if dst_sizes is None or not any(dst_sizes):
                     return None
                 tsa.set_tile_sizes_attr(dst, dst_sizes)
                 remember(dst)
                 return dst
+
+            def is_tensor_passthrough(candidate: ir.Operation) -> bool:
+                # Conservative nested propagation: only step through rank-preserving
+                # tensor.* one-input/one-result wrappers (for example tensor.cast).
+                name = candidate.operation.name
+                if not name.startswith("tensor."):
+                    return False
+                if (
+                    len(candidate.opview.operands) != 1
+                    or len(candidate.opview.results) != 1
+                ):
+                    return False
+
+                in_ty = candidate.opview.operands[0].type
+                out_ty = candidate.opview.results[0].type
+                try:
+                    in_tensor = ir.RankedTensorType(in_ty)
+                    out_tensor = ir.RankedTensorType(out_ty)
+                except ValueError:
+                    return False
+                if in_tensor.rank != out_tensor.rank or in_tensor.rank == 0:
+                    return False
+                for in_dim, out_dim in zip(in_tensor.shape, out_tensor.shape):
+                    dyn = ir.ShapedType.get_dynamic_size()
+                    if in_dim != dyn and out_dim != dyn and in_dim != out_dim:
+                        return False
+                return True
+
+            def forward_loop_passthrough(
+                value: ir.Value, user: ir.Operation
+            ) -> ir.Value | None:
+                # Bridge `%v` -> `scf.yield %v` -> `%for_result` for scf.for.
+                if user.operation.name != "scf.yield":
+                    return None
+                parent = user.operation.parent
+                if parent is None or parent.name != "scf.for":
+                    return None
+                for idx, operand in enumerate(user.opview.operands):
+                    if operand != value:
+                        continue
+                    results = list(parent.opview.results)
+                    if idx < len(results):
+                        return results[idx]
+                    return None
+                return None
+
+            def backward_loop_passthrough(value: ir.Value) -> ir.Value | None:
+                # Bridge `%for_result` -> `scf.yield %yield_operand` for scf.for.
+                owner = value.owner
+                if not isinstance(owner, ir.Operation):
+                    return None
+                if owner.name != "scf.for":
+                    return None
+
+                result_index = None
+                for idx, result in enumerate(owner.opview.results):
+                    if result == value:
+                        result_index = idx
+                        break
+                if result_index is None:
+                    return None
+
+                blocks = owner.regions[0].blocks
+                if not blocks:
+                    return None
+                ops = list(blocks[0].operations)
+                if not ops:
+                    return None
+                yield_op = ops[-1]
+                if yield_op.operation.name != "scf.yield":
+                    return None
+                if result_index >= len(yield_op.opview.operands):
+                    return None
+                return yield_op.opview.operands[result_index]
+
+            def forward_neighbors(src_shared: ir.Value):
+                queue = deque([src_shared])
+                seen_values = {src_shared.__hash__()}
+                while queue:
+                    value = queue.popleft()
+                    for user in op_users(value):
+                        if tp.is_propagatable(user):
+                            yield src_shared, value, user
+                            continue
+                        next_from_loop = forward_loop_passthrough(value, user)
+                        if next_from_loop is not None:
+                            key = next_from_loop.__hash__()
+                            if key in seen_values:
+                                continue
+                            seen_values.add(key)
+                            queue.append(next_from_loop)
+                            continue
+                        if not is_tensor_passthrough(user):
+                            continue
+                        next_value = user.opview.results[0]
+                        key = next_value.__hash__()
+                        if key in seen_values:
+                            continue
+                        seen_values.add(key)
+                        queue.append(next_value)
+
+            def backward_neighbors(src_shared: ir.Value):
+                queue = deque([src_shared])
+                seen_values = {src_shared.__hash__()}
+                while queue:
+                    value = queue.popleft()
+                    producer = defining_op(value)
+                    if producer is None:
+                        prev_from_loop = backward_loop_passthrough(value)
+                        if prev_from_loop is not None:
+                            key = prev_from_loop.__hash__()
+                            if key in seen_values:
+                                continue
+                            seen_values.add(key)
+                            queue.append(prev_from_loop)
+                        continue
+                    if tp.is_propagatable(producer):
+                        yield src_shared, value, producer
+                        continue
+                    if not is_tensor_passthrough(producer):
+                        continue
+                    prev_value = producer.opview.operands[0]
+                    key = prev_value.__hash__()
+                    if key in seen_values:
+                        continue
+                    seen_values.add(key)
+                    queue.append(prev_value)
 
             seeds = [r for r in root_ops if tsa.get_tile_sizes_attr(r) is not None]
             for seed in seeds:
@@ -103,8 +248,8 @@ class PropagateTileSizesOp(
                 idx += 1
                 src_sizes = tsa.get_tile_sizes_attr(src)
                 for result in src.opview.results:
-                    for user in op_users(result):
-                        dst = claim(src, src_sizes, result, user)
+                    for src_shared, dst_shared, user in forward_neighbors(result):
+                        dst = claim(src, src_sizes, src_shared, dst_shared, user)
                         if dst is not None:
                             forward.append(dst)
 
@@ -119,12 +264,10 @@ class PropagateTileSizesOp(
                 idx += 1
                 src_sizes = tsa.get_tile_sizes_attr(src)
                 for operand in src.opview.operands:
-                    producer = defining_op(operand)
-                    if producer is None:
-                        continue
-                    dst = claim(src, src_sizes, operand, producer)
-                    if dst is not None:
-                        backward.append(dst)
+                    for src_shared, dst_shared, producer in backward_neighbors(operand):
+                        dst = claim(src, src_sizes, src_shared, dst_shared, producer)
+                        if dst is not None:
+                            backward.append(dst)
 
             results.set_ops(op.annotated, annotated)
             return DiagnosedSilenceableFailure.Success
