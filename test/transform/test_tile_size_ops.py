@@ -208,3 +208,17 @@ run(
         strategy="register_parallel",
     ),
 )
+
+
+# Register-reduction strategy: only the reduction K dim is tiled.
+# CHECK-LABEL: Test: register_reduction_strategy
+# CHECK: linalg.batch_matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 0, 0, 0, 2>
+run(
+    "register_reduction_strategy",
+    BATCH_MATMUL_PAYLOAD,
+    lambda: build_assign_schedule(
+        "linalg.batch_matmul",
+        strategy="register_reduction",
+    ),
+)
