@@ -1,10 +1,12 @@
 from .strategy_base import TilingStrategy
 from .strategy_cache import CacheTilingStrategy
+from .strategy_register_parallel import RegisterParallelTilingStrategy
 
 
 # Maps each canonical strategy name to its implementation class.
 _STRATEGY_REGISTRY: dict[str, type[TilingStrategy]] = {
     "cache": CacheTilingStrategy,
+    "register_parallel": RegisterParallelTilingStrategy,
 }
 
 
