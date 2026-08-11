@@ -70,6 +70,17 @@ def build_register_reduction():
     return sched
 
 
+def build_register_unroll():
+    with schedule_boilerplate() as (sched, named_seq):
+        ops = lh_transform.match_op(named_seq.bodyTarget, "linalg.matmul")
+        assign_tile_sizes(
+            ops,
+            strategy="register_unroll",
+        )
+        transform.yield_()
+    return sched
+
+
 # CHECK-LABEL: Test: f32_register_parallel_default
 # CHECK: linalg.matmul
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 8, 32, 0>
@@ -101,4 +112,21 @@ with TargetInfo.override(features=["amx_tile"]):
         "bf16_amx_register_reduction_default",
         BF16_MATMUL,
         lambda: build_register_reduction(),
+    )
+
+
+# CHECK-LABEL: Test: f32_register_unroll_default
+# CHECK: linalg.matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 1, 16, 1>
+run("f32_register_unroll_default", F32_MATMUL, lambda: build_register_unroll())
+
+
+# CHECK-LABEL: Test: bf16_amx_register_unroll_default
+# CHECK: linalg.matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 16, 16, 32>
+with TargetInfo.override(features=["amx_tile"]):
+    run(
+        "bf16_amx_register_unroll_default",
+        BF16_MATMUL,
+        lambda: build_register_unroll(),
     )
