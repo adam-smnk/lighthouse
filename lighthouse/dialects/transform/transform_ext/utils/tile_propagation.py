@@ -89,9 +89,35 @@ def compatible_on_value(
     Returns True when the tiles cannot be determined, so grouping errs toward
     fusion rather than over-splitting.
     """
-    a = tiles_on_value(src_op, src_sizes, shared)
-    b = tiles_on_value(dst_op, dst_sizes, shared)
+    return compatible_on_values(
+        src_op,
+        src_sizes,
+        shared,
+        dst_op,
+        dst_sizes,
+        shared,
+    )
+
+
+def compatible_on_values(
+    src_op: ir.Operation | ir.OpView,
+    src_sizes: Sequence[int],
+    src_shared: ir.Value,
+    dst_op: ir.Operation | ir.OpView,
+    dst_sizes: Sequence[int],
+    dst_shared: ir.Value,
+) -> bool:
+    """Check compatibility when source and destination see aliased values.
+
+    This is used when the shared tensor crosses through lightweight wrapper ops
+    (for example tensor.cast), so the producer and consumer do not use the exact
+    same SSA value.
+    """
+    a = tiles_on_value(src_op, src_sizes, src_shared)
+    b = tiles_on_value(dst_op, dst_sizes, dst_shared)
     if a is None or b is None:
+        return True
+    if len(a) != len(b):
         return True
     return all(x == y for x, y in zip(a, b) if x != 0 and y != 0)
 
@@ -109,6 +135,27 @@ def propagate_through_value(
 
     Returns `dst_op`'s tile sizes (loop order), or None if not possible.
     """
+    return propagate_through_values(
+        src_op,
+        src_sizes,
+        shared,
+        shared,
+        dst_op,
+    )
+
+
+def propagate_through_values(
+    src_op: ir.Operation | ir.OpView,
+    src_sizes: Sequence[int],
+    src_shared: ir.Value,
+    dst_shared: ir.Value,
+    dst_op: ir.Operation | ir.OpView,
+) -> list[int] | None:
+    """Propagate tile sizes across possibly-aliased shared values.
+
+    `src_shared` and `dst_shared` may be different SSA values that represent the
+    same logical tensor across wrapper ops.
+    """
     src = opview(src_op)
     dst = opview(dst_op)
 
@@ -117,9 +164,11 @@ def propagate_through_value(
         return None
 
     # Tile size per dimension of the shared tensor, as induced by the source.
-    tensor_tiles = tiles_on_value(src, src_sizes, shared)
-    dst_map = _map_for_value(dst, shared, dst_maps)
+    tensor_tiles = tiles_on_value(src, src_sizes, src_shared)
+    dst_map = _map_for_value(dst, dst_shared, dst_maps)
     if tensor_tiles is None or dst_map is None:
+        return None
+    if len(tensor_tiles) != len(dst_map.results):
         return None
 
     if len(list(dst.results)) != 1:

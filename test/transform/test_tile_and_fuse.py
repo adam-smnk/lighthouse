@@ -298,6 +298,96 @@ module {
 }
 """
 
+# A K-split matmul in an scf.for accumulation loop, with elementwise consumers
+# outside the loop. Tile propagation must cross the loop boundary from the
+# yielded matmul result to the loop result and then to the consumers.
+K_LOOP_GEMM_OUTER_CHAIN = """
+#map = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<32x64xf32>, %b: tensor<64x128xf32>) -> tensor<32x128xf32> {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %cst = arith.constant 0.0 : f32
+    %init = tensor.empty() : tensor<32x128xf32>
+    %acc0 = linalg.fill ins(%cst : f32) outs(%init : tensor<32x128xf32>) -> tensor<32x128xf32>
+    %acc = scf.for %k = %c0 to %c64 step %c32 iter_args(%iter = %acc0) -> (tensor<32x128xf32>) {
+      %a_slice = tensor.extract_slice %a[0, %k] [32, 32] [1, 1]
+          : tensor<32x64xf32> to tensor<32x32xf32>
+      %b_slice = tensor.extract_slice %b[%k, 0] [32, 128] [1, 1]
+          : tensor<64x128xf32> to tensor<32x128xf32>
+      %mm = linalg.matmul ins(%a_slice, %b_slice : tensor<32x32xf32>, tensor<32x128xf32>)
+          outs(%iter : tensor<32x128xf32>) -> tensor<32x128xf32>
+      scf.yield %mm : tensor<32x128xf32>
+    }
+    %out0 = tensor.empty() : tensor<32x128xf32>
+    %relu = linalg.generic {indexing_maps = [#map, #map],
+        iterator_types = ["parallel", "parallel"]}
+        ins(%acc : tensor<32x128xf32>)
+        outs(%out0 : tensor<32x128xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      %c = arith.cmpf ugt, %in, %cst : f32
+      %s = arith.select %c, %in, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<32x128xf32>
+    %out1 = tensor.empty() : tensor<32x128xf32>
+    %exp = linalg.generic {indexing_maps = [#map, #map],
+        iterator_types = ["parallel", "parallel"]}
+        ins(%relu : tensor<32x128xf32>)
+        outs(%out1 : tensor<32x128xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      %e = math.exp %in : f32
+      linalg.yield %e : f32
+    } -> tensor<32x128xf32>
+    return %exp : tensor<32x128xf32>
+  }
+}
+"""
+
+# A dynamic-typed accumulator carried through an scf.for with matmul inside.
+# Even though dynamic shapes are not the main target today, propagation should
+# remain robust and annotate the elementwise consumer outside the loop.
+DYN_K_LOOP_GEMM_OUTER = """
+#map = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<32x64xf32>, %b: tensor<64x128xf32>) -> tensor<?x?xf32> {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %cst = arith.constant 0.0 : f32
+    %init = tensor.empty() : tensor<32x128xf32>
+    %acc0 = linalg.fill ins(%cst : f32) outs(%init : tensor<32x128xf32>) -> tensor<32x128xf32>
+    %acc_dyn = tensor.cast %acc0 : tensor<32x128xf32> to tensor<?x?xf32>
+    %acc = scf.for %k = %c0 to %c64 step %c32 iter_args(%iter = %acc_dyn) -> (tensor<?x?xf32>) {
+      %a_slice = tensor.extract_slice %a[0, %k] [32, 32] [1, 1]
+          : tensor<32x64xf32> to tensor<32x32xf32>
+      %b_slice = tensor.extract_slice %b[%k, 0] [32, 128] [1, 1]
+          : tensor<64x128xf32> to tensor<32x128xf32>
+      %iter_static = tensor.cast %iter : tensor<?x?xf32> to tensor<32x128xf32>
+      %mm = linalg.matmul ins(%a_slice, %b_slice : tensor<32x32xf32>, tensor<32x128xf32>)
+          outs(%iter_static : tensor<32x128xf32>) -> tensor<32x128xf32>
+      %mm_dyn = tensor.cast %mm : tensor<32x128xf32> to tensor<?x?xf32>
+      scf.yield %mm_dyn : tensor<?x?xf32>
+    }
+    %d0 = tensor.dim %acc, %c0 : tensor<?x?xf32>
+    %d1 = tensor.dim %acc, %c1 : tensor<?x?xf32>
+    %out = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+    %relu = linalg.generic {indexing_maps = [#map, #map],
+        iterator_types = ["parallel", "parallel"]}
+        ins(%acc : tensor<?x?xf32>)
+        outs(%out : tensor<?x?xf32>) {
+    ^bb0(%in: f32, %o: f32):
+      %c = arith.cmpf ugt, %in, %cst : f32
+      %s = arith.select %c, %in, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<?x?xf32>
+    return %relu : tensor<?x?xf32>
+  }
+}
+"""
+
 # A high-dimensional contraction.
 HIGH_DIM_CONTRACT = """
 #mapA = affine_map<(b, m0, m1, n, k) -> (b, m0, m1, k)>
@@ -548,6 +638,39 @@ module {
 """
 
 
+# A GEMM anchor whose result crosses a rank-preserving tensor.cast before a
+# linalg consumer. Propagation should still map matmul M/N tiles onto the
+# elementwise op through the aliasing wrapper.
+GEMM_CAST_RELU = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+module {
+  func.func @main(%a: tensor<64x64xf32>, %w: tensor<64x64xf32>) -> tensor<?x?xf32> {
+    %cst = arith.constant 0.0 : f32
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %e = tensor.empty() : tensor<64x64xf32>
+    %f = linalg.fill ins(%cst: f32) outs(%e: tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mm = linalg.matmul ins(%a, %w : tensor<64x64xf32>, tensor<64x64xf32>)
+        outs(%f : tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mm_dyn = tensor.cast %mm : tensor<64x64xf32> to tensor<?x?xf32>
+    %d0 = tensor.dim %mm_dyn, %c0 : tensor<?x?xf32>
+    %d1 = tensor.dim %mm_dyn, %c1 : tensor<?x?xf32>
+    %e2 = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+    %relu = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"]}
+        ins(%mm_dyn : tensor<?x?xf32>)
+        outs(%e2 : tensor<?x?xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %c = arith.cmpf ugt, %i, %cst : f32
+      %s = arith.select %c, %i, %cst : f32
+      linalg.yield %s : f32
+    } -> tensor<?x?xf32>
+    return %relu : tensor<?x?xf32>
+  }
+}
+"""
+
+
 # A GEMM anchors tiling; its tile sizes are propagated to the fill producer and
 # the elementwise (bias, relu) consumers, then the whole group is fused.
 # CHECK-LABEL: Test: mlp_assign_propagate
@@ -666,6 +789,26 @@ run("mlp_three_layers", MLP3, assign_gemm, tile_and_fuse)
 run("dynamic_tile_and_fuse", DYN, assign_gemm, tile_and_fuse)
 
 
+# Propagation crosses the scf.for loop boundary: a matmul inside a K loop drives
+# tile annotations on elementwise consumers outside the loop.
+# CHECK-LABEL: Test: k_loop_matmul_propagation
+# CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("k_loop_matmul_propagation", K_LOOP_GEMM_OUTER_CHAIN, assign_gemm)
+
+
+# Dynamic-shape stress case: verify propagation across loop-carried dynamic
+# tensors does not crash and still annotates the outside elementwise consumer.
+# CHECK-LABEL: Test: dyn_k_loop_matmul_propagation_no_crash
+# CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("dyn_k_loop_matmul_propagation_no_crash", DYN_K_LOOP_GEMM_OUTER, assign_gemm)
+
+
 # High-dimensional contraction: only the innermost two parallel (M, N) output
 # dims are tiled with the tile size; the outer parallel dims (batch and the
 # outer M dim) get a unit tile and the reduction (K) dim is left untiled, just
@@ -782,6 +925,15 @@ run("named_broadcast_transpose_anchor", NAMED_BROADCAST_TRANSPOSE, assign_elemen
 # CHECK: linalg.transpose
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
 run("gemm_named_transpose_propagate", GEMM_NAMED_TRANSPOSE, assign_gemm)
+
+
+# Propagation through a rank-preserving tensor alias wrapper.
+# CHECK-LABEL: Test: gemm_tensor_cast_propagate
+# CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+# CHECK: tensor.cast
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 32, 32>
+run("gemm_tensor_cast_propagate", GEMM_CAST_RELU, assign_gemm)
 
 
 # A larger elementwise payload for demonstrating repeated tiling rounds.
