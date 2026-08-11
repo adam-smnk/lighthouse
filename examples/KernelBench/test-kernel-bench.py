@@ -1,21 +1,26 @@
-# RUN: python %s --ci | FileCheck %s
-# RUN: python %s --ci --no-torch-compile | FileCheck %s
+# RUN: %PYTHON %s --ci | FileCheck %s
+# RUN: %PYTHON %s --ci --no-torch-compile | FileCheck %s
 
 # REQUIRES: torch
+# REQUIRES: torch_mlir
 # REQUIRES: kernel_bench
 
 import argparse
 import re
 import subprocess
 from pathlib import Path
+import sys
 
 import yaml
 
-from lighthouse.execution.target import TargetInfo
-from lighthouse.pipeline import find_pipeline_file
-
-script_path = Path(__file__).parent
+script_path = Path(__file__).resolve().parent
 project_root = script_path.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from lighthouse.execution.target import TargetInfo  # noqa: E402
+from lighthouse.pipeline import find_pipeline_file  # noqa: E402
+
 kb_program = project_root / "tools" / "kernel-bench"
 kb_path = project_root / "third_party" / "KernelBench" / "KernelBench"
 yaml_files = [
@@ -165,6 +170,7 @@ if __name__ == "__main__":
         command_line = []
 
         command_line += [
+            sys.executable,
             str(kb_program),
             str(kb_kernel),
             "--dtype",
