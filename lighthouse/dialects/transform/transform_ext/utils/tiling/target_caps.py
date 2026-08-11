@@ -72,3 +72,8 @@ def generic_parallel_tiles(
     out_elem = ir.ShapedType(linalg_outputs(op)[0].type).element_type
     inner = _vector_lane_count(target, out_elem)
     return [inner] if len(parallel_dims) == 1 else [1, inner]
+
+
+def generic_reduction_tiles() -> list[int]:
+    """Default reduction tile for ops without a microkernel profile."""
+    return [1]

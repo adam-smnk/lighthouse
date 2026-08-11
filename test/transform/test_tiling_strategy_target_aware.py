@@ -72,6 +72,17 @@ def build_register_parallel():
     return sched
 
 
+def build_register_reduction():
+    with schedule_boilerplate() as (sched, named_seq):
+        ops = lh_transform.match_op(named_seq.bodyTarget, "linalg.matmul")
+        assign_tile_sizes(
+            ops,
+            strategy="register_reduction",
+        )
+        transform.yield_()
+    return sched
+
+
 # CHECK-LABEL: Test: f32_register_parallel_default
 # CHECK: linalg.matmul
 # CHECK-SAME: transform_ext.tile_sizes = array<i64: 8, 32, 0>
@@ -157,4 +168,46 @@ with TargetInfo.override(features=[]):
         "eltwise_register_parallel_no_features",
         ELTWISE,
         lambda: build_register_parallel_eltwise(),
+    )
+
+
+# CHECK-LABEL: Test: f32_register_reduction_default
+# CHECK: linalg.matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 0, 0, 2>
+run("f32_register_reduction_default", F32_MATMUL, lambda: build_register_reduction())
+
+
+# CHECK-LABEL: Test: bf16_amx_register_reduction_default
+# CHECK: linalg.matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 0, 0, 32>
+with TargetInfo.override(features=["amx_tile"]):
+    run(
+        "bf16_amx_register_reduction_default",
+        BF16_MATMUL,
+        lambda: build_register_reduction(),
+    )
+
+
+# Without AMX, bf16 matmul is not an all-f32 contraction either, so it falls back
+# to the generic reduction tile.
+# CHECK-LABEL: Test: bf16_no_amx_register_reduction_generic_fallback
+# CHECK: linalg.matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 0, 0, 1>
+with TargetInfo.override(features=[]):
+    run(
+        "bf16_no_amx_register_reduction_generic_fallback",
+        BF16_MATMUL,
+        lambda: build_register_reduction(),
+    )
+
+
+# An AMX-capable target must not change f32 GEMM reduction tiling.
+# CHECK-LABEL: Test: f32_register_reduction_under_amx_target
+# CHECK: linalg.matmul
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 0, 0, 2>
+with TargetInfo.override(features=["amx_tile"]):
+    run(
+        "f32_register_reduction_under_amx_target",
+        F32_MATMUL,
+        lambda: build_register_reduction(),
     )
