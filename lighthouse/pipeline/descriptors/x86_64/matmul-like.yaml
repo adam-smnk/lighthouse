@@ -4,6 +4,7 @@ Pipeline:
                                   block_factors=$block_factors
                                   tile_size=$tile_size
                                 }
+  - schedule: "sfc.py[gen=remap]"
 
   ## CPU register-level tiling flow (strategy-driven)
   - pass: "linalg-morph-ops{named-to-category generic-to-named}"
