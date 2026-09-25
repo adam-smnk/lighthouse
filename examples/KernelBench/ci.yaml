@@ -23,6 +23,19 @@
   output_shape: 64x512
   gflops: (64 * 512) / 1e9
 
+- kernel: level1/38_L1Norm_.py
+  input_shapes: [256x4096]
+  initializations: [rnd]
+  output_shape: 256x4096
+  gflops: (256 * 4096) / 1e9
+
+- kernel: level1/47_Sum_reduction_over_a_dimension.py
+  input_shapes: [16x256x1024]
+  initializations: [rnd]
+  output_shape: 16x1x1024
+  init_args: "[1]"
+  gflops: (16 * 256 * 1024) / 1e9
+
 - kernel: level3/1_MLP.py
   input_shapes: [64x128]
   initializations: [rnd]

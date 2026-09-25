@@ -2,7 +2,12 @@ from mlir import ir
 
 
 from lighthouse.execution.target import RegisterInfo, TargetInfo
-from lighthouse.utils.mlir import linalg_outputs, opview, is_linalg_eltwise_op
+from lighthouse.utils.mlir import (
+    is_linalg_eltwise_op,
+    is_linalg_reduction_op,
+    linalg_outputs,
+    opview,
+)
 
 from .strategy_base import StrategyContext, TilingStrategy
 from .common import (
@@ -10,6 +15,7 @@ from .common import (
     disable_small_tiles,
     parallel_and_reduction_dims,
 )
+from .strategy_register_reduction import ReductionRegisterTiling
 from .target_caps import (
     generic_parallel_tiles,
     is_amx_bf16_contraction,
@@ -104,6 +110,8 @@ class RegisterParallelTilingStrategy(TilingStrategy):
             inner_tiles = [32, 32]
         elif is_f32_contraction(ov):
             inner_tiles = [8, 32]
+        elif is_linalg_reduction_op(ov):
+            return ReductionRegisterTiling.parallel_tiles(ov, ctx.target)
         elif is_linalg_eltwise_op(ov):
             inner_tiles = EltwiseRegisterTiling.choose_parallel_tile_shape(
                 ov, parallel_dims, ctx.target

@@ -105,6 +105,44 @@ def assign_elementwise_tile_sizes(
     return sched
 
 
+def assign_reduction_tile_sizes(
+    tile_size: int = 32,
+    strategy: str = "register_parallel",
+    propagate: bool = False,
+    propagate_through_loops: bool = False,
+) -> ir.Module:
+    """
+    Anchor tiling on non-contraction reductions (e.g. softmax, norms).
+
+    Already-annotated ops are kept.
+
+    Args:
+        tile_size: Tiling size hint.
+        strategy: Tiling strategy.
+        propagate: Whether to propagate the tile sizes to neighboring ops.
+        propagate_through_loops: Whether to propagate through loop-carried
+            values instead of treating loops as barriers (default: False).
+    Returns:
+        Schedule
+    """
+    with schedule_boilerplate() as (sched, named_seq):
+        candidates = lh_transform.match_op(
+            named_seq.bodyTarget, structured.MatchInterfaceEnum.LinalgOp
+        )
+        reductions = transform_ext.filter_non_contraction_reductions(candidates)
+        annotated = transform_ext.assign_tile_sizes(
+            reductions,
+            tile_size=tile_size,
+            strategy=strategy,
+        )
+        if propagate:
+            transform_ext.propagate_tile_sizes(
+                annotated, propagate_through_loops=propagate_through_loops
+            )
+        transform.yield_()
+    return sched
+
+
 def _execute_annotated(
     target_op: str | list[str] | None,
     use_forall: bool,
