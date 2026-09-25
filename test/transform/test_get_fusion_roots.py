@@ -241,3 +241,61 @@ apply_schedule(INCOMPATIBLE_CHAIN, all_linalg_roots, "INCOMPATIBLE_CHAIN")
 # CHECK-NOT: math.exp
 # CHECK: math.sqrt
 apply_schedule(COMPATIBLE_CHAIN, all_linalg_roots, "COMPATIBLE_CHAIN")
+
+
+# Softmax-like row max -> exp(x - max) -> exp(y) chain where the consumers tile
+# the columns that the row max reduces. COL_TILE sets the recompute factor.
+ROW_MAX_CHAIN = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+#row = affine_map<(d0, d1) -> (d0)>
+module {
+  func.func @main(%x: tensor<64x1024xf32>, %m: tensor<64xf32>,
+      %e: tensor<64x1024xf32>) -> tensor<64x1024xf32> {
+    %max = linalg.generic {indexing_maps = [#id, #row],
+        iterator_types = ["parallel", "reduction"],
+        transform_ext.tile_sizes = array<i64: 1, 0>}
+        ins(%x : tensor<64x1024xf32>) outs(%m : tensor<64xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %r = arith.maximumf %i, %o : f32
+      linalg.yield %r : f32
+    } -> tensor<64xf32>
+    %sub = linalg.generic {indexing_maps = [#id, #row, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 1, COL_TILE>}
+        ins(%x, %max : tensor<64x1024xf32>, tensor<64xf32>)
+        outs(%e : tensor<64x1024xf32>) {
+    ^bb0(%i: f32, %b: f32, %o: f32):
+      %s = arith.subf %i, %b : f32
+      linalg.yield %s : f32
+    } -> tensor<64x1024xf32>
+    %exp = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 1, COL_TILE>}
+        ins(%sub : tensor<64x1024xf32>) outs(%e : tensor<64x1024xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %r = math.exp %i : f32
+      linalg.yield %r : f32
+    } -> tensor<64x1024xf32>
+    return %exp : tensor<64x1024xf32>
+  }
+}
+"""
+
+# Tiling columns by 32 would recompute the row max 32 times: the max becomes
+# its own root, ahead of the elementwise chain.
+# CHECK: IR printer: ROW_MAX_SPLIT
+# CHECK: arith.maximumf
+# CHECK: math.exp
+# CHECK-NOT: arith.subf
+apply_schedule(
+    ROW_MAX_CHAIN.replace("COL_TILE", "32"), all_linalg_roots, "ROW_MAX_SPLIT"
+)
+
+# A few (4) recomputations on cache-resident rows are cheaper than
+# materializing the max: the whole chain stays one group.
+# CHECK: IR printer: ROW_MAX_FUSED
+# CHECK-NOT: arith.maximumf
+# CHECK: math.exp
+apply_schedule(
+    ROW_MAX_CHAIN.replace("COL_TILE", "256"), all_linalg_roots, "ROW_MAX_FUSED"
+)

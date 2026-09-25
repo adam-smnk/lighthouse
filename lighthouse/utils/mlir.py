@@ -376,6 +376,26 @@ def is_linalg_reduction_op(op: ir.Operation | ir.OpView) -> bool:
     return not is_structural_contraction(ov)
 
 
+def linalg_loop_extents(op: ir.Operation | ir.OpView) -> list[int | None] | None:
+    """Static extent of each loop dim of a linalg op (None if dynamic/unknown)."""
+    ov = opview(op)
+    maps = indexing_maps(ov)
+    if maps is None:
+        return None
+    extents: list[int | None] = [None] * maps[0].n_dims
+    for value, amap in zip(ov.operands, maps):
+        if not isinstance(value.type, ir.ShapedType):
+            continue
+        shape = ir.ShapedType(value.type).shape
+        for tensor_dim, expr in enumerate(amap.results):
+            pos = dim_position(expr)
+            if pos is None or extents[pos] is not None:
+                continue
+            if ir.ShapedType.is_static_size(shape[tensor_dim]):
+                extents[pos] = shape[tensor_dim]
+    return extents
+
+
 def op_users(value: ir.Value) -> list[ir.Operation]:
     """Return the ops that use `value`."""
     users = []

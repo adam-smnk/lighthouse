@@ -1,11 +1,23 @@
 from mlir import ir
-from mlir.dialects import linalg
+from mlir.dialects import linalg, tensor
 
-from lighthouse.utils.mlir import opview, defining_op
+from lighthouse.utils.mlir import (
+    defining_op,
+    dim_position,
+    indexing_maps,
+    is_linalg_reduction_op,
+    linalg_inputs,
+    linalg_loop_extents,
+    linalg_reduction_dims,
+    opview,
+)
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 
 # Attribute used to annotate an op as a new fusion separator.
 FUSION_BOUNDARY_ATTR_NAME = "transform_ext.fusion_boundary"
+
+# Max number of times a fused reduction may be recomputed before it is split out.
+MAX_REDUCTION_RECOMPUTE = 8
 
 
 def is_fusion_boundary(op: ir.Operation | ir.OpView) -> bool:
@@ -67,3 +79,69 @@ def has_barrier_ancestor(op: ir.Operation | ir.OpView) -> bool:
             return True
         push_producers(cur)
     return False
+
+
+def reductions_feeding(value: ir.Value) -> list[ir.Operation]:
+    """Reductions computing `value`, possibly through a chain of elementwise
+    ops and reshapes (which greedy producer fusion pulls in too).
+    """
+    found: list[ir.Operation] = []
+    stack = [value]
+    visited: set = set()
+    while stack:
+        producer = defining_op(stack.pop())
+        if producer is None:
+            continue
+        key = producer.__hash__()
+        if key in visited:
+            continue
+        visited.add(key)
+        ov = opview(producer)
+        if isinstance(ov, (tensor.ExpandShapeOp, tensor.CollapseShapeOp)):
+            stack.append(ov.src)
+            continue
+        if indexing_maps(ov) is None:
+            continue
+        if is_linalg_reduction_op(ov):
+            found.append(producer)
+        elif not linalg_reduction_dims(ov):
+            stack.extend(linalg_inputs(ov))
+    return found
+
+
+def recomputes_reduction(
+    consumer: ir.Operation | ir.OpView,
+    consumer_sizes: list[int] | None,
+    shared: ir.Value,
+) -> bool:
+    """Check whether fusing the producer of `shared` into `consumer` recomputes a reduction.
+
+    That is the case when `consumer` tiles a loop dim which does not index
+    `shared` (e.g. softmax columns vs. the row max): each such tile would
+    recompute the entire producer slice, including a full reduction.
+    A few recomputations (up to `MAX_REDUCTION_RECOMPUTE`) are tolerated as
+    they hit cache-resident data and are cheaper than materializing.
+    """
+    if not consumer_sizes:
+        return False
+    ov = opview(consumer)
+    maps = indexing_maps(ov)
+    inputs = linalg_inputs(ov)
+    extents = linalg_loop_extents(ov)
+    if maps is None or inputs is None:
+        return False
+    shared_maps = [maps[i] for i, v in enumerate(inputs) if v == shared]
+    if not shared_maps:
+        return False
+    used = {dim_position(e) for m in shared_maps for e in m.results}
+    factor = 1
+    for dim, size in enumerate(consumer_sizes[: len(extents)]):
+        if size == 0 or dim in used:
+            continue
+        if extents[dim] is None:
+            factor = MAX_REDUCTION_RECOMPUTE + 1
+            break
+        factor *= -(-extents[dim] // size)
+    if factor <= MAX_REDUCTION_RECOMPUTE:
+        return False
+    return bool(reductions_feeding(shared))

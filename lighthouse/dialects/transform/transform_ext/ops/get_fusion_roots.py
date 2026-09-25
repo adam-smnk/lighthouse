@@ -6,7 +6,7 @@ from lighthouse.dialects.transform.transform_ext import TransformExtensionDialec
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
 from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
 from lighthouse.dialects.transform.transform_ext.utils import tile_propagation as tp
-from lighthouse.utils.mlir import op_users
+from lighthouse.utils.mlir import defining_op, indexing_maps, linalg_inputs, op_users
 
 
 class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roots"):
@@ -48,11 +48,15 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
         """Check whether `consumer` shares `producer`'s fusion group across `shared` tensor."""
         if fa.is_fusion_boundary(consumer):
             return False
+        consumer_sizes = tsa.get_tile_sizes_attr(consumer)
+        # Fusing would recompute a reduction for every consumer tile.
+        if fa.recomputes_reduction(consumer, consumer_sizes, shared):
+            return False
         return tp.compatible_on_value(
             producer,
             tsa.get_tile_sizes_attr(producer),
             consumer,
-            tsa.get_tile_sizes_attr(consumer),
+            consumer_sizes,
             shared,
         )
 
@@ -87,6 +91,42 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
         # A terminal op of a barrier-free group (or one that only feeds a
         # different group across a boundary) is its own root.
         return True
+
+    @staticmethod
+    def _recomputed_reductions(root: ir.Operation) -> list[ir.Operation]:
+        """Annotated reductions that fusing producers into `root` would recompute.
+
+        Mimics greedy producer fusion: `root`'s tiles are propagated to its linalg
+        producers and a reduction is reported when some fused op splits a loop dim
+        that does not index the reduction-derived operand.
+        """
+        found: list[ir.Operation] = []
+        stack = [(root, tsa.get_tile_sizes_attr(root))]
+        visited: set = set()
+        while stack:
+            op, sizes = stack.pop()
+            key = op.__hash__()
+            if key in visited or not sizes:
+                continue
+            visited.add(key)
+            for operand in linalg_inputs(op) or []:
+                producer = defining_op(operand)
+                if producer is None or indexing_maps(producer) is None:
+                    continue
+                if fa.is_fusion_barrier(producer):
+                    continue
+                if fa.recomputes_reduction(op, sizes, operand):
+                    found.extend(
+                        r
+                        for r in fa.reductions_feeding(operand)
+                        if tsa.get_tile_sizes_attr(r) is not None
+                    )
+                    continue
+                producer_sizes = tp.propagate_through_value(
+                    op, sizes, operand, producer
+                )
+                stack.append((producer, producer_sizes))
+        return found
 
     @staticmethod
     def _in_program_order(ops: list[ir.Operation]) -> list[ir.Operation]:
@@ -136,6 +176,17 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
                     continue
                 if GetFusionRootsOp._is_fusion_root(target_op):
                     roots.append(target_op)
+
+            # Tile reductions on their own (before their consumers) when fusing
+            # them into a consumer would recompute them for every tile.
+            seen = {r.__hash__() for r in roots}
+            pending = list(roots)
+            while pending:
+                for red in GetFusionRootsOp._recomputed_reductions(pending.pop()):
+                    if red.__hash__() not in seen:
+                        seen.add(red.__hash__())
+                        roots.append(red)
+                        pending.append(red)
 
             # Order roots to allow easy use of greedy producer fusion.
             roots = GetFusionRootsOp._in_program_order(roots)

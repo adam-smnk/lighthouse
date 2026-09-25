@@ -6,6 +6,7 @@ from lighthouse.utils.mlir import (
     indexing_maps,
     is_linalg_reduction_op,
     linalg_inputs,
+    linalg_loop_extents,
     linalg_outputs,
     linalg_reduction_dims,
     opview,
@@ -81,23 +82,6 @@ class ReductionRegisterTiling:
         return max(1, min(cls._ACC_CHAINS, cls._register_info(target).count // 2))
 
     @staticmethod
-    def loop_extents(op: ir.OpView) -> list[int | None]:
-        """Static extent of each loop dim (None if dynamic or unknown)."""
-        maps = indexing_maps(op)
-        extents: list[int | None] = [None] * maps[0].n_dims
-        for value, amap in zip(op.operands, maps):
-            if not isinstance(value.type, ir.ShapedType):
-                continue
-            shape = ir.ShapedType(value.type).shape
-            for tensor_dim, expr in enumerate(amap.results):
-                pos = dim_position(expr)
-                if pos is None or extents[pos] is not None:
-                    continue
-                if ir.ShapedType.is_static_size(shape[tensor_dim]):
-                    extents[pos] = shape[tensor_dim]
-        return extents
-
-    @staticmethod
     def vector_dim(op: ir.OpView) -> int | None:
         """Loop dim indexing the innermost dim of the least broadcast input."""
         maps = indexing_maps(op)
@@ -156,7 +140,7 @@ class ReductionRegisterTiling:
         vdim = cls.vector_dim(ov)
         if vdim is None:
             return None
-        extents = cls.loop_extents(ov)
+        extents = linalg_loop_extents(ov)
         reduction_dims = linalg_reduction_dims(ov)
         parallel_dims = [d for d in range(len(extents)) if d not in reduction_dims]
         return ov, vdim, extents, parallel_dims, reduction_dims
