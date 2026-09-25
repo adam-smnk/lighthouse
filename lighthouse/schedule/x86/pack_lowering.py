@@ -84,12 +84,20 @@ def lower_unpacks(unpack_ops):
         transform.yield_()
 
 
-def lower_packs_unpacks(tile_size: int = 32) -> ir.Module:
+def lower_packs_unpacks(
+    tile_size: int = 32,
+    defer_reduction_unpacks: bool = False,
+    skip_panel_members: bool = False,
+) -> ir.Module:
     """
     Lower pack and unpack ops into hardware-friendly, vectorized ops.
 
     Args:
         tile_size: Target size for sub-tiling pack and unpack ops' inner tiles
+        defer_reduction_unpacks: Keep unpacks that feed reductions (e.g. a
+            softmax after a packed GEMM) so that cache-level tiling can fuse
+            them; they must be lowered by a later invocation.
+        skip_panel_members: Keep unpacks fused into a GEMM row panel.
     Returns:
         Schedule
     """
@@ -99,6 +107,10 @@ def lower_packs_unpacks(tile_size: int = 32) -> ir.Module:
         lh_transform.cleanup(named_seq.bodyTarget)
 
         unpacks = lh_transform.match_op(named_seq.bodyTarget, "linalg.unpack")
+        if defer_reduction_unpacks:
+            unpacks = transform_ext.filter_not_feeding_reductions(unpacks)
+        if skip_panel_members:
+            unpacks = transform_ext.filter_non_panel_members(unpacks)
         lower_unpacks(transform_ext.assign_tile_sizes(unpacks, tile_size=tile_size))
 
         # Cleanup.

@@ -7,8 +7,9 @@ from lighthouse.dialects.transform.transform_ext.utils.make_filter_handles_op im
 from lighthouse.dialects.transform.transform_ext.utils.tiling.strategy_register_reduction import (
     ReductionRegisterTiling,
 )
+from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
 from lighthouse.execution.target import TargetInfo
-from lighthouse.utils.mlir import is_linalg_reduction_op, linalg_outputs
+from lighthouse.utils.mlir import is_linalg_reduction_op, linalg_outputs, opview
 
 
 def _has_reduction_loop(op: ir.OpView) -> bool:
@@ -44,6 +45,49 @@ def filter_reduction_ops(target: ir.Value[transform.AnyOpType]) -> ir.Value:
 FilterNonContractionReductionsOp = make_filter_handles_op(
     "filter_non_contraction_reductions", is_linalg_reduction_op
 )
+
+
+def _not_feeding_reductions(op: ir.Operation | ir.OpView) -> bool:
+    return not any(fa.feeds_reduction(r) for r in opview(op).results)
+
+
+FilterNotFeedingReductionsOp = make_filter_handles_op(
+    "filter_not_feeding_reductions", _not_feeding_reductions
+)
+
+
+def filter_not_feeding_reductions(
+    target: ir.Value[transform.AnyOpType],
+) -> ir.Value:
+    """
+    snake_case wrapper to create a FilterNotFeedingReductionsOp.
+
+    Keeps ops whose results do not flow into a non-contraction reduction through
+    elementwise and relayout ops (see `fusion_analysis.feeds_reduction`).
+
+    Args:
+        target: Handle to target op(s).
+    Returns:
+        Handle to the matching ops.
+    """
+    return FilterNotFeedingReductionsOp(target=target).ops
+
+
+FilterNonPanelMembersOp = make_filter_handles_op(
+    "filter_non_panel_members", lambda op: not fa.is_panel_member(op)
+)
+
+
+def filter_non_panel_members(target: ir.Value[transform.AnyOpType]) -> ir.Value:
+    """
+    snake_case wrapper to create a FilterNonPanelMembersOp.
+
+    Args:
+        target: Handle to target op(s).
+    Returns:
+        Handle to the ops that are not fused into a GEMM row panel.
+    """
+    return FilterNonPanelMembersOp(target=target).ops
 
 
 def filter_non_contraction_reductions(

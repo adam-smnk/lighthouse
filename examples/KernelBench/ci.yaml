@@ -36,6 +36,13 @@
   init_args: "[1]"
   gflops: (16 * 256 * 1024) / 1e9
 
+- kernel: level2/99_Matmul_GELU_Softmax.py
+  input_shapes: [256x256]
+  initializations: [rnd]
+  output_shape: 256x512
+  init_args: "[256,512]"
+  gflops: (2 * 256 * 256 * 512) / 1e9
+
 - kernel: level3/1_MLP.py
   input_shapes: [64x128]
   initializations: [rnd]

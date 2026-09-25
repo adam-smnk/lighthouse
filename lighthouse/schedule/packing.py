@@ -1,6 +1,7 @@
 from mlir import ir
 from mlir.dialects import transform
 
+from lighthouse.dialects.transform import transform_ext
 from lighthouse.schedule.builders import schedule_boilerplate
 import lighthouse.transform as lh_transform
 
@@ -52,6 +53,8 @@ def block_pack_matmuls(
             },
         )
         lh_transform.pack_propagation(named_seq.bodyTarget)
+        # Let reductions read the propagated layout instead of a relayout copy.
+        transform_ext.fold_relayout_into_reduction(named_seq.bodyTarget)
         lh_transform.cleanup(named_seq.bodyTarget)
 
         transform.yield_()

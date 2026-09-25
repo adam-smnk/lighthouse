@@ -8,13 +8,38 @@ Pipeline:
                           block_factors=[32,32,32]
                           tile_size=32
                         }
+  # Unit-dim outputs, e.g. (d0, 0) of keepdim reductions, block producer fusion.
+  - schedule: "linalg.py[gen=linalg_contract_fold_unit_dims]"
+  - include: cleanup.yaml
 
   ## 1) CPU cache-level tiling - improves data locality and exposes parallelism.
-  - include: tile-and-fuse.yaml {
-                                  strategy=cache
-                                  propagate=True
-                                  use_forall=True
-                                }
+  ## Reductions are anchored after GEMMs but before elementwise ops so that
+  ## softmax/norm chains share one row-panel tiling.
+  ## GEMMs with a row-reduction epilogue are first fused per row panel.
+  - schedule: "tile_and_fuse.py[gen=assign_panel_tile_sizes]"
+  # Deferred unpacks outside of any panel are lowered as usual.
+  - schedule: "x86/pack_lowering.py[gen=lower_packs_unpacks]{
+      tile_size=32
+      skip_panel_members=True
+    }"
+  - schedule: "tile_and_fuse.py[gen=assign_and_propagate_tile_sizes]{
+      strategy=cache
+      propagate=True
+    }"
+  - schedule: "tile_and_fuse.py[gen=assign_reduction_tile_sizes]{
+      strategy=cache
+      propagate=True
+    }"
+  - schedule: "tile_and_fuse.py[gen=assign_elementwise_tile_sizes]{
+      strategy=cache
+      propagate=True
+    }"
+  - schedule: "tile_and_fuse.py[gen=tile_and_fuse_annotated]{
+      use_forall=True
+    }"
+  - include: cleanup.yaml
+  # Lower unpacks deferred by pack.yaml, now tiled within their panels.
+  - schedule: "x86/pack_lowering.py[gen=lower_packs_unpacks]{tile_size=32}"
   - include: cleanup.yaml
   # Simplify shapes.
   - schedule: "linalg.py[gen=linalg_contract_fold_unit_dims]"

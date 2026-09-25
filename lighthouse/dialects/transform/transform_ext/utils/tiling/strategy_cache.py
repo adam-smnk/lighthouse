@@ -2,7 +2,14 @@ from mlir import ir
 from mlir.dialects import linalg
 
 from lighthouse.execution.target import TargetInfo
-from lighthouse.utils.mlir import linalg_outputs, opview, is_linalg_eltwise_op
+from lighthouse.utils.mlir import (
+    is_linalg_eltwise_op,
+    is_linalg_reduction_op,
+    linalg_loop_extents,
+    linalg_outputs,
+    linalg_reduction_dims,
+    opview,
+)
 
 from .strategy_base import StrategyContext, TilingStrategy
 from .common import disable_small_tiles, parallel_and_reduction_dims
@@ -187,6 +194,69 @@ class EltwiseCacheTiling:
         return tiles
 
 
+class ReductionCacheTiling:
+    """Row-panel cache tiling for non-contraction reductions (softmax, norms).
+
+    Reduced dims are kept whole so that the reduction and its elementwise
+    neighbours (which share the tiling via propagation) fuse into one loop
+    without recomputation. Parallel dims are grown, innermost first, until the
+    panel fills the L2 budget, then shrunk to expose enough parallel tiles.
+    """
+
+    # Tensors of the fused chain live per panel, e.g. input, exp and output.
+    _LIVE_TENSORS = 3
+    _TILES_PER_CORE = 4
+
+    @staticmethod
+    def _largest_divisor(extent: int, limit: int) -> int:
+        for tile in range(min(extent, max(1, limit)), 0, -1):
+            if extent % tile == 0:
+                return tile
+        return 1
+
+    @classmethod
+    def choose_tile_shape(
+        cls, op: ir.OpView, target: TargetInfo | None
+    ) -> list[int] | None:
+        extents = linalg_loop_extents(op)
+        reduction_dims = linalg_reduction_dims(op)
+        if extents is None or any(e is None for e in extents):
+            return None
+        parallel_dims = [d for d in range(len(extents)) if d not in reduction_dims]
+        if not parallel_dims:
+            return None
+        target = target or TargetInfo.host()
+
+        elem_type = ir.ShapedType(linalg_outputs(op)[0].type).element_type
+        elem_bytes = max(4, (getattr(elem_type, "width", 32) + 7) // 8)
+        reduced_elems = 1
+        for d in reduction_dims:
+            reduced_elems *= extents[d]
+        budget = target.l2_cache_bytes() // 2
+        panel_rows = max(1, budget // (reduced_elems * elem_bytes * cls._LIVE_TENSORS))
+
+        sizes = [0] * len(extents)
+        for d in parallel_dims:
+            sizes[d] = 1
+        for d in reversed(parallel_dims):
+            if panel_rows <= 1:
+                break
+            sizes[d] = cls._largest_divisor(extents[d], panel_rows)
+            panel_rows //= sizes[d]
+
+        def num_tiles() -> int:
+            count = 1
+            for d in parallel_dims:
+                count *= extents[d] // sizes[d]
+            return count
+
+        min_tiles = target.core_count() * cls._TILES_PER_CORE
+        for d in parallel_dims:
+            while num_tiles() < min_tiles and sizes[d] > 1:
+                sizes[d] = cls._largest_divisor(extents[d], sizes[d] // 2)
+        return sizes
+
+
 class CacheTilingStrategy(TilingStrategy):
     """Cache-level tiling.
 
@@ -222,6 +292,8 @@ class CacheTilingStrategy(TilingStrategy):
                 sizes[dim] = value
             disable_small_tiles(ov, out_map, sizes, ctx.tile_size)
             return sizes
+        if is_linalg_reduction_op(ov):
+            return ReductionCacheTiling.choose_tile_shape(ov, ctx.target)
 
         out_map = self.output_map(ov)
         if out_map is None:

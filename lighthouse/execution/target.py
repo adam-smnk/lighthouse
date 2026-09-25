@@ -27,6 +27,9 @@ class TargetInfo:
     _override_features_stack: list[list[str] | None] = []
     _override_arch_stack: list[str | None] = []
     _override_core_count_stack: list[int | None] = []
+    _override_l2_bytes_stack: list[int | None] = []
+    # Fallback when the L2 size cannot be detected.
+    DEFAULT_L2_CACHE_BYTES = 1024 * 1024
 
     def __init__(
         self,
@@ -34,6 +37,7 @@ class TargetInfo:
         features: list[str] | None = None,
         filter: list[str] | None = None,
         core_count: int | None = None,
+        l2_cache_bytes: int | None = None,
     ):
         if arch is None and self.__class__._override_arch_stack:
             arch = self.__class__._override_arch_stack[-1]
@@ -43,10 +47,13 @@ class TargetInfo:
                 features = list(override)
         if core_count is None and self.__class__._override_core_count_stack:
             core_count = self.__class__._override_core_count_stack[-1]
+        if l2_cache_bytes is None and self.__class__._override_l2_bytes_stack:
+            l2_cache_bytes = self.__class__._override_l2_bytes_stack[-1]
 
         self.arch = arch if arch is not None else platform.machine()
         self.features = features if features is not None else self._get_feature_list()
         self._core_count = self._resolve_core_count(core_count)
+        self._l2_cache_bytes = l2_cache_bytes
         # Pre-filter, if requested.
         if filter is not None:
             self.features = self.has_features(filter)
@@ -58,6 +65,7 @@ class TargetInfo:
             cls._override_features_stack
             or cls._override_arch_stack
             or cls._override_core_count_stack
+            or cls._override_l2_bytes_stack
         ):
             return cls()
         if cls._cached_host is None:
@@ -77,6 +85,7 @@ class TargetInfo:
         features: list[str] | None = None,
         arch: str | None = None,
         core_count: int | None = None,
+        l2_cache_bytes: int | None = None,
     ):
         """Temporarily override auto-detected host target info for tests."""
         cls._override_features_stack.append(
@@ -84,6 +93,7 @@ class TargetInfo:
         )
         cls._override_arch_stack.append(arch)
         cls._override_core_count_stack.append(core_count)
+        cls._override_l2_bytes_stack.append(l2_cache_bytes)
         cls.reset_host_cache()
         try:
             yield
@@ -91,6 +101,7 @@ class TargetInfo:
             cls._override_features_stack.pop()
             cls._override_arch_stack.pop()
             cls._override_core_count_stack.pop()
+            cls._override_l2_bytes_stack.pop()
             cls.reset_host_cache()
 
     def _get_feature_list(self) -> list[str]:
@@ -183,6 +194,36 @@ class TargetInfo:
     def core_count(self) -> int:
         """Return the target's available core count for sizing heuristics."""
         return self._core_count
+
+    def l2_cache_bytes(self) -> int:
+        """Return the per-core L2 cache size, detected on Linux or a default."""
+        if self._l2_cache_bytes is None:
+            self._l2_cache_bytes = (
+                self._detect_l2_cache_bytes() or self.DEFAULT_L2_CACHE_BYTES
+            )
+        return self._l2_cache_bytes
+
+    @staticmethod
+    def _detect_l2_cache_bytes() -> int | None:
+        cache_dir = "/sys/devices/system/cpu/cpu0/cache"
+        if not os.path.isdir(cache_dir):
+            return None
+        units = {"K": 1024, "M": 1024 * 1024, "G": 1024 * 1024 * 1024}
+        for index in sorted(os.listdir(cache_dir)):
+            path = os.path.join(cache_dir, index)
+            try:
+                with open(os.path.join(path, "level")) as f:
+                    if f.read().strip() != "2":
+                        continue
+                with open(os.path.join(path, "size")) as f:
+                    size = f.read().strip()
+            except OSError:
+                continue
+            if size and size[-1] in units and size[:-1].isdigit():
+                return int(size[:-1]) * units[size[-1]]
+            if size.isdigit():
+                return int(size)
+        return None
 
     def vector_register_info(self) -> RegisterInfo | None:
         """Infer SIMD register info from target features."""
