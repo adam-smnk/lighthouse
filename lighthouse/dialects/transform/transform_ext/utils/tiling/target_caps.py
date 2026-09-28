@@ -9,8 +9,20 @@ from lighthouse.utils.mlir import (
     linalg_outputs,
     opview,
 )
+from lighthouse.execution.target import RegisterInfo
 
 from .common import assign_reduction_tiles, parallel_and_reduction_dims
+
+# Independent vector accumulators hiding the combiner latency
+# (~4 cycles on 2 ports on recent x86 cores).
+REDUCTION_ACC_CHAINS = 8
+
+
+def register_info(target: TargetInfo | None) -> RegisterInfo:
+    """Vector register bank of the target; AVX-512 (32 x 512-bit) by default."""
+    return (target and target.vector_register_info()) or RegisterInfo(
+        width_bits=512, count=32
+    )
 
 
 def _contraction_operand_types(
@@ -147,3 +159,8 @@ def generic_parallel_tiles(
 def generic_reduction_tiles() -> list[int]:
     """Default reduction tile for ops without a microkernel profile."""
     return [1]
+
+
+def reduction_acc_chains(target: TargetInfo | None) -> int:
+    """Independent accumulators, capped to leave room for loads/temporaries."""
+    return max(1, min(REDUCTION_ACC_CHAINS, register_info(target).count // 2))
