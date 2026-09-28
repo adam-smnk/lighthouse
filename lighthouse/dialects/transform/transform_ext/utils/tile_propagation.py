@@ -6,6 +6,7 @@ from lighthouse.utils.mlir import (
     opview,
     indexing_maps,
     dim_position,
+    is_linalg_reduction_op,
     linalg_inputs,
     linalg_outputs,
 )
@@ -17,13 +18,20 @@ def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
 
     True for any structured linalg op that is not a fusion barrier; non-linalg
     ops have no indexing maps to translate tiles through and are excluded.
+    Non-contraction reductions are excluded too: they are anchored by their
+    own strategy, as tiles derived from neighbours (e.g. a GEMM register tile)
+    can be a poor fit for them. They still propagate to their neighbours.
 
     Args:
         op: Candidate op to annotate.
     Returns:
         True if `op` can receive propagated tile sizes.
     """
-    return indexing_maps(op) is not None and not fa.is_fusion_barrier(op)
+    return (
+        indexing_maps(op) is not None
+        and not fa.is_fusion_barrier(op)
+        and not is_linalg_reduction_op(op)
+    )
 
 
 def _map_for_value(

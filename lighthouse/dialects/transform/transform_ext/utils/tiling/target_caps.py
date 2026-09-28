@@ -1,10 +1,21 @@
 from mlir import ir
 from mlir.dialects import linalg
 
-from lighthouse.execution.target import TargetInfo
+from lighthouse.execution.target import RegisterInfo, TargetInfo
 from lighthouse.utils.mlir import linalg_inputs, linalg_outputs, opview
 
 from .common import parallel_and_reduction_dims
+
+# Independent vector accumulators hiding the combiner latency
+# (~4 cycles on 2 ports on recent x86 cores).
+REDUCTION_ACC_CHAINS = 8
+
+
+def register_info(target: TargetInfo | None) -> RegisterInfo:
+    """Vector register bank of the target; AVX-512 (32 x 512-bit) by default."""
+    return (target and target.vector_register_info()) or RegisterInfo(
+        width_bits=512, count=32
+    )
 
 
 def _contraction_operand_types(
@@ -54,8 +65,8 @@ def is_f32_contraction(op: ir.Operation | ir.OpView) -> bool:
     return types is not None and all(isinstance(t, ir.F32Type) for t in types)
 
 
-def vector_lane_count(target: TargetInfo | None, elem_type: ir.Type) -> int:
-    """SIMD lane count for a single vector register; does not include the full register bank."""
+def storage_lane_count(target: TargetInfo | None, elem_type: ir.Type) -> int:
+    """SIMD lanes of one register at the storage width of `elem_type`."""
     vector_bits = (
         target.vector_register_width_bits
         if target is not None and target.vector_register_width_bits is not None
@@ -76,10 +87,15 @@ def generic_parallel_tiles(
     if not parallel_dims:
         return []
     out_elem = ir.ShapedType(linalg_outputs(op)[0].type).element_type
-    inner = vector_lane_count(target, out_elem)
+    inner = storage_lane_count(target, out_elem)
     return [inner] if len(parallel_dims) == 1 else [1, inner]
 
 
 def generic_reduction_tiles() -> list[int]:
     """Default reduction tile for ops without a microkernel profile."""
     return [1]
+
+
+def reduction_acc_chains(target: TargetInfo | None) -> int:
+    """Independent accumulators, capped to leave room for loads/temporaries."""
+    return max(1, min(REDUCTION_ACC_CHAINS, register_info(target).count // 2))

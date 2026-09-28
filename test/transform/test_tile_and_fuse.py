@@ -51,6 +51,10 @@ def assign_elementwise64():
     return tf.assign_elementwise_tile_sizes(tile_size=64, strategy="cache")
 
 
+def assign_reduction():
+    return tf.assign_reduction_tile_sizes(tile_size=32, strategy="cache")
+
+
 def tile_and_fuse():
     return tf.tile_and_fuse_annotated()
 
@@ -646,13 +650,25 @@ run("elementwise_tile_and_fuse", ELTWISE, assign_elementwise, tile_and_fuse)
 run("batch_matmul", BMM, assign_gemm)
 
 
-# Reduction: an elementwise op anchors the group and propagation reaches the
-# reduction consumer, tiling its parallel dim and leaving the reduction dim
-# untiled (0). A standalone reduction is not an elementwise anchor.
-# CHECK-LABEL: Test: reduction
+# Reduction: propagation from an elementwise anchor does not reach the
+# reduction, which is anchored by its own strategy instead.
+# CHECK-LABEL: Test: reduction_not_propagated
+# CHECK: iterator_types = ["parallel", "parallel"]
+# CHECK-SAME: transform_ext.tile_sizes
 # CHECK: iterator_types = ["parallel", "reduction"]
-# CHECK-SAME: transform_ext.tile_sizes = array<i64: 4, 0>
-run("reduction", REDUCE, assign_elementwise)
+# CHECK-NOT: transform_ext.tile_sizes
+# CHECK: return
+run("reduction_not_propagated", REDUCE, assign_elementwise)
+
+
+# Reduction anchor: the parallel dim gets the tiles of an elementwise op over the
+# result, the reduction dim stays whole (0).
+# CHECK-LABEL: Test: reduction_anchor
+# CHECK: iterator_types = ["parallel", "parallel"]
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 4, 64>
+# CHECK: iterator_types = ["parallel", "reduction"]
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 64, 0>
+run("reduction_anchor", REDUCE, assign_reduction, assign_elementwise)
 
 
 # The elementwise anchor schedule covers named variants: a linalg.elementwise
