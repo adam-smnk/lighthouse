@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
 from mlir import ir
+from mlir.dialects import linalg, tensor
 
 from lighthouse.utils.mlir import (
     dim_position,
@@ -8,6 +9,8 @@ from lighthouse.utils.mlir import (
     indexing_maps,
     map_dims,
     opview,
+    pack_inner_blocks,
+    pack_outer_perm,
 )
 from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
 
@@ -176,32 +179,116 @@ def propagate_through_values(
     Returns:
         `dst_op`'s tile sizes in its loop order, or None if not possible.
     """
-    src = opview(src_op)
-    dst = opview(dst_op)
-
-    dst_maps = indexing_maps(dst)
-    if dst_maps is None:
+    tensor_tiles = tiles_on_value(src_op, src_sizes, src_shared)
+    if tensor_tiles is None:
         return None
+    return sizes_from_value_tiles(dst_op, dst_shared, tensor_tiles)
 
-    # Tile size per dimension of the shared tensor, as induced by the source.
-    tensor_tiles = tiles_on_value(src, src_sizes, src_shared)
-    dst_map = indexing_map_for_value(dst, dst_shared)
-    if tensor_tiles is None or dst_map is None:
-        return None
-    if len(tensor_tiles) != len(dst_map.results):
-        return None
 
-    if len(list(dst.results)) != 1:
-        return None
-    dst_out_map = dst_maps[-1]
-    dst_parallel = map_dims(dst_out_map)
+def sizes_from_value_tiles(
+    op: ir.Operation | ir.OpView,
+    value: ir.Value,
+    tiles: Sequence[int],
+    reject_reduced: bool = False,
+) -> list[int] | None:
+    """Tile sizes of `op` induced by the per-dimension `tiles` of `value`.
 
-    dst_sizes = [0] * dst_out_map.n_dims
-    for tensor_dim, expr in enumerate(dst_map.results):
+    Only parallel dims of `op` are tiled; reduction dims stay untiled.
+
+    Args:
+        op: Single-result structured linalg op using `value`.
+        value: Operand or result of `op` the tiles apply to.
+        tiles: One tile per dimension of `value` (0 = whole dim).
+        reject_reduced: Fail instead of dropping tiles that land on reduction
+            dims (fusing would then recompute the producer for every tile).
+    Returns:
+        `op`'s tile sizes in its loop order, or None if not possible.
+    """
+    ov = opview(op)
+    maps = indexing_maps(ov)
+    value_map = indexing_map_for_value(ov, value)
+    if maps is None or value_map is None or len(list(ov.results)) != 1:
+        return None
+    if len(tiles) != len(value_map.results):
+        return None
+    parallel = map_dims(maps[-1])
+    sizes = [0] * maps[-1].n_dims
+    for tensor_dim, expr in enumerate(value_map.results):
         pos = dim_position(expr)
-        if pos is None:
+        if pos is None or tiles[tensor_dim] == 0:
             continue
-        # Only tile parallel dims of the consumer; leave reductions untiled.
-        if pos in dst_parallel:
-            dst_sizes[pos] = tensor_tiles[tensor_dim]
-    return dst_sizes
+        if pos in parallel:
+            sizes[pos] = tiles[tensor_dim]
+        elif reject_reduced:
+            return None
+    return sizes
+
+
+def _slice_tiles(op: tensor.ExtractSliceOp, tiles: Sequence[int]) -> list[int]:
+    """Drop the tiles of the unit dims removed by a rank-reducing slice."""
+    res = ir.ShapedType(op.result.type).shape
+    kept, r = [], 0
+    for d, extent in enumerate(ir.ShapedType(op.source.type).shape):
+        if r < len(res) and extent == res[r]:
+            kept.append(tiles[d])
+            r += 1
+    return kept
+
+
+def _packed_tiles(op: linalg.PackOp, plain: Sequence[int]) -> list[int] | None:
+    """Plain -> packed tiles through a pack; only whole blocks are tiled."""
+    blocks = pack_inner_blocks(op)
+    if blocks is None:
+        return None
+    outer_plain = []
+    for d, t in enumerate(plain):
+        block = blocks.get(d)
+        if block is not None and t % block:
+            return None
+        outer_plain.append(t // block if block is not None else t)
+    perm = pack_outer_perm(op, len(plain))
+    return [outer_plain[p] for p in perm] + [0] * len(blocks)
+
+
+def _plain_tiles(op: linalg.UnPackOp, packed: Sequence[int]) -> list[int] | None:
+    """Packed -> plain tiles through an unpack; only whole blocks are tiled."""
+    blocks = pack_inner_blocks(op)
+    if blocks is None:
+        return None
+    rank = len(packed) - len(blocks)
+    plain = [0] * rank
+    for i, p in enumerate(pack_outer_perm(op, rank)):
+        plain[p] = packed[i]
+    for k, d in enumerate(op.inner_dims_pos):
+        inner = packed[rank + k]
+        # Partial blocks: slicing inside every block is not a contiguous plain
+        # tile, and a partial-block tile of one block cannot be proven to read
+        # a single block by the unpack tiling (the slices turn dynamic).
+        if inner not in (0, blocks[d]):
+            return None
+        plain[d] *= blocks[d]
+    return plain
+
+
+def tiles_through_relayout(
+    op: ir.Operation | ir.OpView, tiles: Sequence[int]
+) -> list[int] | None:
+    """Result tiles of a fusable relayout op given the tiles of its source.
+
+    Supports the ops listed by `fusion_analysis.is_fusable_relayout_op`.
+
+    Args:
+        op: Relayout op (rank-reducing full slice, pack or unpack).
+        tiles: One tile per dimension of the source (0 = whole dim).
+    Returns:
+        One tile per dimension of the result, or None if the tiling cannot be
+        expressed on the result.
+    """
+    ov = opview(op)
+    if isinstance(ov, tensor.ExtractSliceOp):
+        return _slice_tiles(ov, tiles)
+    if isinstance(ov, linalg.PackOp):
+        return _packed_tiles(ov, tiles)
+    if isinstance(ov, linalg.UnPackOp):
+        return _plain_tiles(ov, tiles)
+    return None

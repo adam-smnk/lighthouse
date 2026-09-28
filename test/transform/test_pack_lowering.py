@@ -193,3 +193,55 @@ run("mixed", MIXED, lower)
 # CHECK-NOT: linalg.pack
 # CHECK-NOT: linalg.unpack
 run("unrelated_ops_preserved", UNRELATED_OPS, lower)
+
+
+# An unpack feeding a row sum next to a GEMM row-panel member unpack feeding an
+# elementwise op.
+DEFERRED_UNPACKS = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+#row = affine_map<(d0, d1) -> (d0)>
+module {
+  func.func @main(%p: tensor<4x8x32x32xf32>, %q: tensor<4x8x32x32xf32>,
+      %r: tensor<128xf32>) -> (tensor<128xf32>, tensor<128x256xf32>) {
+    %o = tensor.empty() : tensor<128x256xf32>
+    %u = linalg.unpack %p inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o
+        : tensor<4x8x32x32xf32> -> tensor<128x256xf32>
+    %sum = linalg.generic {indexing_maps = [#id, #row],
+        iterator_types = ["parallel", "reduction"]}
+        ins(%u : tensor<128x256xf32>) outs(%r : tensor<128xf32>) {
+    ^bb0(%x: f32, %acc: f32):
+      %s = arith.addf %x, %acc : f32
+      linalg.yield %s : f32
+    } -> tensor<128xf32>
+    %u2 = linalg.unpack %q inner_dims_pos = [0, 1] inner_tiles = [32, 32] into %o
+        {transform_ext.fusion_panel} : tensor<4x8x32x32xf32> -> tensor<128x256xf32>
+    %e = linalg.elementwise <exp>
+        ins(%u2 : tensor<128x256xf32>)
+        outs(%o : tensor<128x256xf32>) -> tensor<128x256xf32>
+    return %sum, %e : tensor<128xf32>, tensor<128x256xf32>
+  }
+}
+"""
+
+# The unpack feeding the reduction is kept for cache-level fusion.
+# CHECK-LABEL: Test: defer_reduction_unpacks
+# CHECK: linalg.unpack %arg0
+# CHECK-NOT: linalg.unpack
+# CHECK: return
+run(
+    "defer_reduction_unpacks",
+    DEFERRED_UNPACKS,
+    lambda: lower_packs_unpacks(tile_size=32, defer_reduction_unpacks=True),
+)
+
+# The panel member unpack is kept to be fused into its panel.
+# CHECK-LABEL: Test: skip_panel_members
+# CHECK-NOT: linalg.unpack %arg0
+# CHECK: linalg.unpack %arg1
+# CHECK-NOT: linalg.unpack
+# CHECK: return
+run(
+    "skip_panel_members",
+    DEFERRED_UNPACKS,
+    lambda: lower_packs_unpacks(tile_size=32, skip_panel_members=True),
+)

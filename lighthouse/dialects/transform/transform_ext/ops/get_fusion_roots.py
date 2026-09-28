@@ -69,6 +69,9 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
 
     @staticmethod
     def _is_fusion_root(target_op: ir.Operation) -> bool:
+        # Panel members are fused as producers of the panel's terminal root.
+        if fa.is_panel_member(target_op):
+            return False
         annotated_consumers = [
             (result, user)
             for result in target_op.opview.results
@@ -127,6 +130,7 @@ class GetFusionRootsOp(TransformExtensionDialect.Operation, name="get_fusion_roo
                         r
                         for r in fa.reductions_feeding(operand)
                         if tsa.get_tile_sizes_attr(r) is not None
+                        and not fa.is_panel_member(r)
                     )
                     continue
                 producer_sizes = tp.propagate_through_value(

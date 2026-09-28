@@ -358,3 +358,46 @@ module {
 # CHECK-NOT: arith.divf
 # CHECK: arith.subf
 apply_schedule(STACKED_ROW_REDUCTIONS, all_linalg_roots, "STACKED_ROW_REDUCTIONS")
+
+
+# GEMM row-panel members are only fused into the panel root: neither the GEMM
+# (with a conflicting tiling) nor the column-tiled row max become roots.
+PANEL_MEMBERS = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+#row = affine_map<(d0, d1) -> (d0)>
+module {
+  func.func @main(%a: tensor<64x16xf32>, %w: tensor<16x1024xf32>,
+      %c: tensor<64x1024xf32>, %m: tensor<64xf32>) -> tensor<64x1024xf32> {
+    %mm = linalg.matmul
+        {transform_ext.fusion_panel, transform_ext.tile_sizes = array<i64: 64, 64, 0>}
+        ins(%a, %w : tensor<64x16xf32>, tensor<16x1024xf32>)
+        outs(%c : tensor<64x1024xf32>) -> tensor<64x1024xf32>
+    %max = linalg.generic {indexing_maps = [#id, #row],
+        iterator_types = ["parallel", "reduction"],
+        transform_ext.fusion_panel, transform_ext.tile_sizes = array<i64: 32, 0>}
+        ins(%mm : tensor<64x1024xf32>) outs(%m : tensor<64xf32>) {
+    ^bb0(%i: f32, %o: f32):
+      %r = arith.maximumf %i, %o : f32
+      linalg.yield %r : f32
+    } -> tensor<64xf32>
+    %sub = linalg.generic {indexing_maps = [#id, #row, #id],
+        iterator_types = ["parallel", "parallel"],
+        transform_ext.tile_sizes = array<i64: 32, 32>}
+        ins(%mm, %max : tensor<64x1024xf32>, tensor<64xf32>)
+        outs(%c : tensor<64x1024xf32>) {
+    ^bb0(%i: f32, %b: f32, %o: f32):
+      %s = arith.subf %i, %b : f32
+      linalg.yield %s : f32
+    } -> tensor<64x1024xf32>
+    return %sub : tensor<64x1024xf32>
+  }
+}
+"""
+
+# CHECK: IR printer: PANEL_MEMBERS
+# CHECK-NOT: linalg.matmul
+# CHECK-NOT: arith.maximumf
+# CHECK: arith.subf
+# CHECK-NOT: linalg.matmul
+# CHECK-NOT: arith.maximumf
+apply_schedule(PANEL_MEMBERS, all_linalg_roots, "PANEL_MEMBERS")

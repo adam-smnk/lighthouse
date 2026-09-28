@@ -37,6 +37,7 @@ class ClearTileAndFuseAnnotationsOp(
     def _clear(visited: ir.Operation) -> ir.WalkResult:
         tsa.clear_tile_sizes_attr(visited)
         fa.clear_fusion_boundary(visited)
+        fa.clear_panel_member(visited)
         return ir.WalkResult.ADVANCE
 
     class TransformOpInterfaceModel(transform.TransformOpInterface):

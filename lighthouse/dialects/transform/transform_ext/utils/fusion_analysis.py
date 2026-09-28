@@ -12,6 +12,7 @@ from lighthouse.utils.mlir import (
     linalg_reduction_dims,
     map_dims,
     op_key,
+    op_users,
     opview,
 )
 from lighthouse.dialects.transform.transform_ext.utils import tile_size_analysis as tsa
@@ -19,6 +20,9 @@ from lighthouse.dialects.transform.transform_ext.utils.tiling.common import tile
 
 # Attribute used to annotate an op as a new fusion separator.
 FUSION_BOUNDARY_ATTR_NAME = "transform_ext.fusion_boundary"
+
+# Attribute marking ops fused as producers into a GEMM row-panel root.
+FUSION_PANEL_ATTR_NAME = "transform_ext.fusion_panel"
 
 # Max number of times a fused reduction may be recomputed before it is split out.
 MAX_REDUCTION_RECOMPUTE = 8
@@ -39,6 +43,23 @@ def clear_fusion_boundary(op: ir.Operation | ir.OpView) -> None:
     attrs = opview(op).operation.attributes
     if FUSION_BOUNDARY_ATTR_NAME in attrs:
         del attrs[FUSION_BOUNDARY_ATTR_NAME]
+
+
+def is_panel_member(op: ir.Operation | ir.OpView) -> bool:
+    """Whether the op is fused into a GEMM row panel (never a fusion root)."""
+    return FUSION_PANEL_ATTR_NAME in opview(op).operation.attributes
+
+
+def mark_panel_member(op: ir.Operation | ir.OpView) -> None:
+    """Mark the op as fused into a GEMM row panel."""
+    opview(op).operation.attributes[FUSION_PANEL_ATTR_NAME] = ir.UnitAttr.get()
+
+
+def clear_panel_member(op: ir.Operation | ir.OpView) -> None:
+    """Remove the GEMM row-panel marker from an op, if present."""
+    attrs = opview(op).operation.attributes
+    if FUSION_PANEL_ATTR_NAME in attrs:
+        del attrs[FUSION_PANEL_ATTR_NAME]
 
 
 def is_fusion_barrier(op: ir.Operation | ir.OpView) -> bool:
@@ -102,6 +123,25 @@ def has_barrier_ancestor(op: ir.Operation | ir.OpView) -> bool:
         if is_fusion_barrier(cur):
             return True
         push_producers(cur)
+    return False
+
+
+def feeds_reduction(value: ir.Value) -> bool:
+    """Whether `value` flows into a non-contraction reduction through
+    elementwise and fusable relayout ops only.
+    """
+    stack = [value]
+    visited: set = set()
+    while stack:
+        for user in op_users(stack.pop()):
+            key = op_key(user)
+            if key in visited:
+                continue
+            visited.add(key)
+            if is_linalg_reduction_op(user):
+                return True
+            if is_fusable_relayout_op(user) or is_elementwise_like(user):
+                stack.extend(user.results)
     return False
 
 

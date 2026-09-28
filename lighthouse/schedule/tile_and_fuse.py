@@ -143,6 +143,25 @@ def assign_reduction_tile_sizes(
     return sched
 
 
+def assign_panel_tile_sizes(tile_size: int = 32) -> ir.Module:
+    """
+    Tile GEMMs with a row-reduction epilogue (e.g. softmax) by row panels.
+
+    See `transform_ext.assign_panel_tile_sizes`. Must run before the other
+    cache-level assignments, which keep existing annotations.
+
+    Args:
+        tile_size: Panel rows for unpacked (plain) GEMMs.
+    Returns:
+        Schedule
+    """
+    with schedule_boilerplate() as (sched, named_seq):
+        gemms = lh_transform.match_op(named_seq.bodyTarget, _GEMM_ANCHOR_OPS)
+        transform_ext.assign_panel_tile_sizes(gemms, tile_size=tile_size)
+        transform.yield_()
+    return sched
+
+
 def _execute_annotated(
     target_op: str | list[str] | None,
     use_forall: bool,
