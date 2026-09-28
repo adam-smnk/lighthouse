@@ -1,8 +1,9 @@
 from mlir import ir
 
-from lighthouse.utils.mlir import opview
+from lighthouse.utils.mlir import is_linalg_reduction_op, opview
 
 from .strategy_base import StrategyContext, TilingStrategy
+from .strategy_register_reduction import ReductionRegisterTiling
 from .common import (
     assign_parallel_tiles,
     assign_reduction_tiles,
@@ -26,12 +27,16 @@ class RegisterUnrollTilingStrategy(TilingStrategy):
         if out_map is None:
             return None
 
+        ov = opview(op)
+        # Reductions may have no parallel dims left (e.g. a rank-1 row reduction).
+        if is_linalg_reduction_op(ov):
+            return ReductionRegisterTiling.unroll_tiles(ov, ctx.target)
+
         sizes = [0] * out_map.n_dims
         parallel_dims, reduction_dims = parallel_and_reduction_dims(out_map)
         if not parallel_dims:
             return None
 
-        ov = opview(op)
         if is_amx_bf16_contraction(ov, ctx.target):
             par_tiles = [16, 16]
             red_tiles = [32]

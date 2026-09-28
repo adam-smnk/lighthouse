@@ -1,10 +1,26 @@
 from mlir import ir
 from mlir.dialects import linalg
 
-from lighthouse.execution.target import TargetInfo
+from lighthouse.execution.target import RegisterInfo, TargetInfo
 from lighthouse.utils.mlir import linalg_inputs, linalg_outputs, opview
 
 from .common import parallel_and_reduction_dims
+
+
+def register_info(target: TargetInfo | None) -> RegisterInfo:
+    """Vector register bank of the target; AVX-512 (32 x 512-bit) by default."""
+    return (target and target.vector_register_info()) or RegisterInfo(
+        width_bits=512, count=32
+    )
+
+
+def compute_bits(elem_type: ir.Type) -> int:
+    """Bit width `elem_type` is computed at; sub-32-bit floats are computed as f32."""
+    if isinstance(elem_type, ir.FloatType):
+        return max(32, elem_type.width)
+    if isinstance(elem_type, ir.IntegerType):
+        return elem_type.width
+    return 32
 
 
 def _contraction_operand_types(

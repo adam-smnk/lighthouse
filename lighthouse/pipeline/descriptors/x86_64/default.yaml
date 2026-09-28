@@ -28,6 +28,9 @@ Pipeline:
   
   ## 2) CPU register-level tiling - ensure data fits in registers.
   ## Parallel register tiles: assign/propagate from contraction anchors and fuse.
+  - schedule: "tile_and_fuse.py[gen=assign_reduction_tile_sizes]{
+      strategy=register_parallel
+    }"
   - include: tile-and-fuse.yaml {
                                   strategy=register_parallel
                                   propagate=True
@@ -36,6 +39,9 @@ Pipeline:
   - include: cleanup.yaml
 
   ## Reduction register tiles: annotate K-like dims and tile ops individually.
+  - schedule: "tile_and_fuse.py[gen=assign_reduction_tile_sizes]{
+      strategy=register_reduction
+    }"
   - include: tile.yaml {
                           strategy=register_reduction
                           propagate=False

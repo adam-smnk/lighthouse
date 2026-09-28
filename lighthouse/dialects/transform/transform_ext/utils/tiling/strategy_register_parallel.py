@@ -1,8 +1,13 @@
 from mlir import ir
 
 
-from lighthouse.execution.target import RegisterInfo, TargetInfo
-from lighthouse.utils.mlir import linalg_outputs, opview, is_linalg_eltwise_op
+from lighthouse.execution.target import TargetInfo
+from lighthouse.utils.mlir import (
+    is_linalg_eltwise_op,
+    is_linalg_reduction_op,
+    linalg_outputs,
+    opview,
+)
 
 from .strategy_base import StrategyContext, TilingStrategy
 from .common import (
@@ -10,10 +15,13 @@ from .common import (
     disable_small_tiles,
     parallel_and_reduction_dims,
 )
+from .strategy_register_reduction import ReductionRegisterTiling
 from .target_caps import (
+    compute_bits,
     generic_parallel_tiles,
     is_amx_bf16_contraction,
     is_f32_contraction,
+    register_info,
 )
 
 
@@ -23,17 +31,8 @@ class EltwiseRegisterTiling:
     @staticmethod
     def register_bank_tile_count(target: TargetInfo | None, elem_type: ir.Type) -> int:
         """Return the number of scalar elements that fit inside the target SIMD register bank."""
-        register = (target and target.vector_register_info()) or RegisterInfo(
-            width_bits=512, count=32
-        )
-        if isinstance(elem_type, ir.FloatType):
-            # Assumes that native sub-32bit float computation is not supported.
-            elem_bits = max(32, elem_type.width)
-        elif isinstance(elem_type, ir.IntegerType):
-            elem_bits = elem_type.width
-        else:
-            elem_bits = 32
-        return max(1, (register.width_bits * register.count) // elem_bits)
+        register = register_info(target)
+        return max(1, (register.width_bits * register.count) // compute_bits(elem_type))
 
     @staticmethod
     def _tile_from_parallel_dims(
@@ -104,6 +103,8 @@ class RegisterParallelTilingStrategy(TilingStrategy):
             inner_tiles = [32, 32]
         elif is_f32_contraction(ov):
             inner_tiles = [8, 32]
+        elif is_linalg_reduction_op(ov):
+            return ReductionRegisterTiling.parallel_tiles(ov, ctx.target)
         elif is_linalg_eltwise_op(ov):
             inner_tiles = EltwiseRegisterTiling.choose_parallel_tile_shape(
                 ov, parallel_dims, ctx.target

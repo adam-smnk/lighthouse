@@ -19,6 +19,7 @@ from .ops.filter_num_loops import filter_num_loops
 from .ops.filter_elementwise import filter_elementwise
 from .ops.filter_by_name import filter_by_name
 from .ops.filter_reduction_ops import filter_reduction_ops
+from .ops.filter_non_contraction_reductions import filter_non_contraction_reductions
 from .ops.filter_contraction_ops import filter_contraction_ops
 from .ops.get_leading_unit_tile_sizes import get_leading_unit_tile_sizes
 from .ops.move_offsets_to_subview import move_offsets_to_subview
@@ -37,6 +38,7 @@ __all__ = [
     "filter_by_name",
     "filter_contraction_ops",
     "filter_elementwise",
+    "filter_non_contraction_reductions",
     "filter_num_loops",
     "filter_reduction_ops",
     "get_fusion_roots",
