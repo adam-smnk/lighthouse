@@ -482,6 +482,20 @@ def is_full_extract_slice(op: ir.Operation | ir.OpView) -> bool:
     )
 
 
+def pack_outer_perm(op: linalg.PackOp | linalg.UnPackOp, rank: int) -> list[int]:
+    """Outer dims permutation of a pack/unpack (identity when absent)."""
+    perm = list(op.outer_dims_perm) if op.outer_dims_perm is not None else []
+    return perm or list(range(rank))
+
+
+def pack_inner_blocks(op: linalg.PackOp | linalg.UnPackOp) -> dict[int, int] | None:
+    """Plain dim -> block size of a pack/unpack, or None for dynamic blocks."""
+    blocks = list(op.static_inner_tiles)
+    if any(ir.ShapedType.is_dynamic_size(b) for b in blocks):
+        return None
+    return dict(zip(op.inner_dims_pos, blocks))
+
+
 def op_users(value: ir.Value) -> list[ir.Operation]:
     """Return the ops that use `value`."""
     users = []

@@ -29,6 +29,7 @@ from .ops.get_fusion_roots import get_fusion_roots
 from .ops.propagate_tile_sizes import propagate_tile_sizes
 from .ops.sfc_remap_forall import sfc_remap_forall
 from .ops.sink_extract_slice_into_loop import sink_extract_slice_into_loop
+from .ops.fold_relayout_into_reduction import fold_relayout_into_reduction
 
 __all__ = [
     "TransformExtensionDialect",
@@ -43,6 +44,7 @@ __all__ = [
     "filter_num_loops",
     "filter_reduction_ops",
     "filter_splittable_reductions",
+    "fold_relayout_into_reduction",
     "get_fusion_roots",
     "get_leading_unit_tile_sizes",
     "get_named_attribute",
