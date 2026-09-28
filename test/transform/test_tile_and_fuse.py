@@ -588,7 +588,7 @@ module {
 
 # A GEMM anchor whose result feeds a named linalg.transpose: tile sizes propagate
 # from the matmul onto the named op, so propagation (propagate_through_value ->
-# _map_for_value) must handle a named op without crashing.
+# indexing_map_for_value) must handle a named op without crashing.
 GEMM_NAMED_TRANSPOSE = """
 module {
   func.func @main(%a: tensor<64x64xf32>, %w: tensor<64x64xf32>) -> tensor<64x64xf32> {

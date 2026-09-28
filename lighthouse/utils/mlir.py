@@ -3,7 +3,7 @@ MLIR utility functions.
 """
 
 from mlir import ir
-from mlir.dialects import func, linalg
+from mlir.dialects import func, linalg, tensor
 import os
 import platform
 from pathlib import Path
@@ -326,6 +326,33 @@ def map_dims(m: ir.AffineMap) -> set[int]:
     return {pos for pos in (dim_position(r) for r in m.results) if pos is not None}
 
 
+def indexing_map_for_value(
+    op: ir.Operation | ir.OpView, value: ir.Value
+) -> ir.AffineMap | None:
+    """Return the indexing map associated with `value` on a structured linalg `op`.
+
+    `value` is matched against `op`'s inputs, then its outputs, then its results
+    (a DPS result shares the map of its positionally matching output operand).
+    Returns None if `op` is not a structured linalg op or does not touch `value`.
+    """
+    ov = opview(op)
+    maps = indexing_maps(ov)
+    inputs = linalg_inputs(ov)
+    outputs = linalg_outputs(ov)
+    if maps is None or inputs is None or outputs is None:
+        return None
+    for i, operand in enumerate(inputs):
+        if operand == value:
+            return maps[i]
+    for k, operand in enumerate(outputs):
+        if operand == value:
+            return maps[len(inputs) + k]
+    for r, result in enumerate(ov.results):
+        if result == value:
+            return maps[len(inputs) + r]
+    return None
+
+
 def linalg_reduction_dims(op: ir.Operation | ir.OpView) -> list[int] | None:
     """Iteration dims not indexed by any output map, or None for non-linalg ops."""
     maps = indexing_maps(op)
@@ -403,6 +430,55 @@ def has_index_ops(op: ir.Operation | ir.OpView) -> bool:
         for region in opview(op).regions
         for block in region.blocks
         for inner in block.operations
+    )
+
+
+def op_key(op: ir.Operation | ir.OpView) -> int:
+    """Identity key of an op, stable across Python wrapper objects."""
+    return opview(op).operation.__hash__()
+
+
+def in_program_order(ops: list[ir.Operation]) -> list[ir.Operation]:
+    """Return `ops` sorted top-down by their position in the payload IR.
+
+    A pre-order walk of the enclosing payload visits ops top-down;
+    only the given `ops` are collected (matched by identity) and the walk stops
+    once all of them have been seen, so other payload ops are ignored.
+
+    NOTE: this is a workaround for `DominanceInfo` not being exposed in the
+    MLIR Python bindings.
+    """
+    if not ops:
+        return ops
+    remaining = {op_key(o): o for o in ops}
+    top = opview(ops[0]).operation
+    while top.parent is not None:
+        top = top.parent
+
+    ordered: list[ir.Operation] = []
+
+    def collect(visited: ir.Operation) -> ir.WalkResult:
+        found = remaining.pop(op_key(visited), None)
+        if found is not None:
+            ordered.append(found)
+            if not remaining:
+                return ir.WalkResult.INTERRUPT
+        return ir.WalkResult.ADVANCE
+
+    top.walk(collect, ir.WalkOrder.PRE_ORDER)
+    return ordered
+
+
+def is_full_extract_slice(op: ir.Operation | ir.OpView) -> bool:
+    """Whether `op` extracts a whole tensor, i.e. is a pure rank reduction."""
+    ov = opview(op)
+    if not isinstance(ov, tensor.ExtractSliceOp):
+        return False
+    shape = ir.ShapedType(ov.source.type).shape
+    return (
+        all(o == 0 for o in ov.static_offsets)
+        and all(s == 1 for s in ov.static_strides)
+        and list(ov.static_sizes) == list(shape)
     )
 
 

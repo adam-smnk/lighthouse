@@ -25,6 +25,21 @@ def largest_divisor(extent: int | None, limit: int) -> int:
     return 1
 
 
+def tile_count(extents: list[int | None], sizes: list[int]) -> int | None:
+    """Number of tiles of an iteration space; untiled (0) dims count once.
+
+    Returns None when a tiled dim has an unknown extent.
+    """
+    count = 1
+    for extent, size in zip(extents, sizes):
+        if not size:
+            continue
+        if extent is None:
+            return None
+        count *= -(-extent // size)
+    return count
+
+
 def assign_from_tail(dims: list[int], values: list[int], sizes: list[int]) -> None:
     """Write `values` onto `sizes` at the trailing `dims`, aligning both by their tails."""
     if not dims or not values:

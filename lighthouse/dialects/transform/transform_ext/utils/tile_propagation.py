@@ -3,11 +3,11 @@ from collections.abc import Sequence
 from mlir import ir
 
 from lighthouse.utils.mlir import (
-    opview,
-    indexing_maps,
     dim_position,
-    linalg_inputs,
-    linalg_outputs,
+    indexing_map_for_value,
+    indexing_maps,
+    map_dims,
+    opview,
 )
 from lighthouse.dialects.transform.transform_ext.utils import fusion_analysis as fa
 
@@ -24,38 +24,6 @@ def is_propagatable(op: ir.Operation | ir.OpView) -> bool:
         True if `op` can receive propagated tile sizes.
     """
     return indexing_maps(op) is not None and not fa.is_fusion_barrier(op)
-
-
-def _map_for_value(
-    op: ir.OpView, value: ir.Value, maps: Sequence[ir.AffineMap]
-) -> ir.AffineMap | None:
-    """Return the indexing map associated with `value` on `op`.
-
-    `value` is matched against `op`'s inputs, then its outputs, then its results
-    (a DPS result shares the map of its positionally matching output operand).
-
-    Args:
-        op: Structured linalg op owning the maps.
-        value: Operand or result of `op` to look up.
-        maps: `op`'s indexing maps, in operand order.
-    Returns:
-        The map indexing `value`, or None if `op` does not touch `value`.
-    """
-    inputs = linalg_inputs(op)
-    outputs = linalg_outputs(op)
-    if inputs is None or outputs is None:
-        return None
-    for i, operand in enumerate(inputs):
-        if operand == value:
-            return maps[i]
-    for k, operand in enumerate(outputs):
-        if operand == value:
-            return maps[len(inputs) + k]
-    # A result corresponds (positionally) to an output operand of a DPS op.
-    for r, result in enumerate(op.results):
-        if result == value:
-            return maps[len(inputs) + r]
-    return None
 
 
 def tiles_on_value(
@@ -79,10 +47,7 @@ def tiles_on_value(
         a structured linalg op or does not touch `value`.
     """
     ov = opview(op)
-    maps = indexing_maps(ov)
-    if maps is None:
-        return None
-    value_map = _map_for_value(ov, value, maps)
+    value_map = indexing_map_for_value(ov, value)
     if value_map is None:
         return None
     tiles = [0] * ir.ShapedType(value.type).rank
@@ -220,7 +185,7 @@ def propagate_through_values(
 
     # Tile size per dimension of the shared tensor, as induced by the source.
     tensor_tiles = tiles_on_value(src, src_sizes, src_shared)
-    dst_map = _map_for_value(dst, dst_shared, dst_maps)
+    dst_map = indexing_map_for_value(dst, dst_shared)
     if tensor_tiles is None or dst_map is None:
         return None
     if len(tensor_tiles) != len(dst_map.results):
@@ -229,9 +194,7 @@ def propagate_through_values(
     if len(list(dst.results)) != 1:
         return None
     dst_out_map = dst_maps[-1]
-    dst_parallel = {
-        pos for pos in (dim_position(e) for e in dst_out_map.results) if pos is not None
-    }
+    dst_parallel = map_dims(dst_out_map)
 
     dst_sizes = [0] * dst_out_map.n_dims
     for tensor_dim, expr in enumerate(dst_map.results):
