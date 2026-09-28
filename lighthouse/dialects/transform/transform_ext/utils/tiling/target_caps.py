@@ -6,6 +6,9 @@ from lighthouse.utils.mlir import linalg_inputs, linalg_outputs, opview
 
 from .common import parallel_and_reduction_dims
 
+# Tensors of a fused reduction chain live per cache panel, e.g. input, exp and output.
+PANEL_LIVE_TENSORS = 3
+
 
 def register_info(target: TargetInfo | None) -> RegisterInfo:
     """Vector register bank of the target; AVX-512 (32 x 512-bit) by default."""
@@ -21,6 +24,16 @@ def compute_bits(elem_type: ir.Type) -> int:
     if isinstance(elem_type, ir.IntegerType):
         return elem_type.width
     return 32
+
+
+def panel_budget_bytes(target: TargetInfo | None) -> int:
+    """Cache budget of one fused panel: half the L2, leaving room for streams."""
+    return (target or TargetInfo.host()).l2_cache_bytes() // 2
+
+
+def panel_bytes(elem_type: ir.Type, elems: int) -> int:
+    """Approximate cache footprint of a fused panel of `elems` elements."""
+    return elems * (compute_bits(elem_type) // 8 or 1) * PANEL_LIVE_TENSORS
 
 
 def _contraction_operand_types(

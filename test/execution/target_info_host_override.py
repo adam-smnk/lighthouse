@@ -65,6 +65,14 @@ with TargetInfo.override(core_count=7):
     print(f"core_count_override={core_count_override.core_count()}")
     # CHECK: core_count_override=7
 
+# Explicit L2 size override should be honored; without it, a detected (or the
+# default) positive size is reported.
+with TargetInfo.override(l2_cache_bytes=4096):
+    print(f"l2_override={TargetInfo.host().l2_cache_bytes()}")
+    # CHECK: l2_override=4096
+print(f"l2_detected_positive={TargetInfo.host().l2_cache_bytes() > 0}")
+# CHECK: l2_detected_positive=True
+
 host_after_overrides = TargetInfo.host()
 same_info = (
     host_before_overrides.arch == host_after_overrides.arch

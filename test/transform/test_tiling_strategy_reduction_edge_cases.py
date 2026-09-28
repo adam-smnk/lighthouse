@@ -6,6 +6,9 @@
 from mlir import ir
 
 import lighthouse.dialects as lh_dialects
+from lighthouse.dialects.transform.transform_ext.utils.tiling.strategy_cache import (
+    ReductionCacheTiling,
+)
 from lighthouse.dialects.transform.transform_ext.utils.tiling.strategy_register_reduction import (
     ReductionRegisterTiling,
 )
@@ -37,6 +40,7 @@ def run(
     elem: str = "f32",
     body: str = ADD,
     features: tuple[str, ...] = ("avx512f",),
+    cores: int = 16,
 ):
     payload = (
         ROW_REDUCE.replace("BODY", body)
@@ -44,7 +48,9 @@ def run(
         .replace("COLS", cols)
         .replace("TYPE", elem)
     )
-    with TargetInfo.override(arch="x86_64", features=list(features)):
+    with TargetInfo.override(
+        arch="x86_64", features=list(features), core_count=cores, l2_cache_bytes=1 << 20
+    ):
         target = TargetInfo.host()
         with ir.Context(), ir.Location.unknown():
             lh_dialects.register_and_load()
@@ -57,17 +63,19 @@ def run(
                 f" parallel={rt.parallel_tiles(op, target)}"
                 f" reduction={rt.reduction_tiles(op, target)}"
                 f" unroll={rt.unroll_tiles(op, target)}"
+                f" cache={ReductionCacheTiling.choose_tile_shape(op, target)}"
             )
 
 
 # Split factor = lanes x 8 chains of the compute width: bf16 is computed as f32.
-# CHECK: f32: split=128 parallel=[1, 0] reduction=[0, 128] unroll=[1, 0]
+# The 64 rows are split into single-row cache panels to feed 16 cores 4 times.
+# CHECK: f32: split=128 parallel=[1, 0] reduction=[0, 128] unroll=[1, 0] cache=[1, 0]
 run("f32")
-# CHECK: bf16: split=128 parallel=[1, 0] reduction=[0, 128]
+# CHECK: bf16: split=128
 run("bf16", elem="bf16")
 # CHECK: f64: split=64 parallel=[1, 0] reduction=[0, 64]
 run("f64", elem="f64")
-# CHECK: i8: split=512 parallel=[1, 0] reduction=[0, 512]
+# CHECK: i8: split=512
 run("i8", elem="i8", body=ADD.replace("addf", "addi"))
 # CHECK: sse: split=32 parallel=[1, 0] reduction=[0, 32]
 run("sse", features=("sse4_2",))
@@ -76,12 +84,17 @@ run("sse", features=("sse4_2",))
 # CHECK: short_row: split=None parallel=[2, 0] reduction=None unroll=[1, 0]
 run("short_row", cols="64")
 
+# Fewer cores: 8-row panels (8 x 4096 x 4 B x 3 live tensors = 384 KiB) fit
+# half of the 1 MiB L2.
+# CHECK: few_cores: split=128 {{.*}} cache=[8, 0]
+run("few_cores", rows="256", cores=4)
+
 # No multiple of the vector width divides 4095: neither split nor tiled.
 # CHECK: non_divisible: split=None parallel=[1, 0] reduction=None unroll=[1, 0]
 run("non_divisible", cols="4095")
 
 # Dynamic reduced extent: only the unit unroll shape is known.
-# CHECK: dynamic: split=None parallel=None reduction=None unroll=[1, 0]
+# CHECK: dynamic: split=None parallel=None reduction=None unroll=[1, 0] cache=None
 run("dynamic", cols="?")
 
 # Non-associative combiner (acc - x) and index-dependent bodies cannot be split.
