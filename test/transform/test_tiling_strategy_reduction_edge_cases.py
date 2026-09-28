@@ -1,7 +1,7 @@
 # RUN: %PYTHON %s | FileCheck %s
 
 # Edge cases of the reduction tiling heuristics: element types, SIMD widths,
-# dynamic and non-divisible extents.
+# dynamic and non-divisible extents and non-splittable bodies.
 
 from mlir import ir
 
@@ -53,33 +53,52 @@ def run(
             op = func.regions[0].blocks[0].operations[0]
             rt = ReductionRegisterTiling
             print(
-                f"{name}: parallel={rt.parallel_tiles(op, target)}"
+                f"{name}: split={rt.split_factor(op, target)}"
+                f" parallel={rt.parallel_tiles(op, target)}"
                 f" reduction={rt.reduction_tiles(op, target)}"
                 f" unroll={rt.unroll_tiles(op, target)}"
             )
 
 
-# The reduced vector dim is tiled by lanes x 8 chains of the compute width:
-# bf16 is computed as f32.
-# CHECK: f32: parallel=[1, 0] reduction=[0, 128] unroll=[1, 0]
+# Split factor = lanes x 8 chains of the compute width: bf16 is computed as f32.
+# CHECK: f32: split=128 parallel=[1, 0] reduction=[0, 128] unroll=[1, 0]
 run("f32")
-# CHECK: bf16: parallel=[1, 0] reduction=[0, 128]
+# CHECK: bf16: split=128 parallel=[1, 0] reduction=[0, 128]
 run("bf16", elem="bf16")
-# CHECK: f64: parallel=[1, 0] reduction=[0, 64]
+# CHECK: f64: split=64 parallel=[1, 0] reduction=[0, 64]
 run("f64", elem="f64")
-# CHECK: i8: parallel=[1, 0] reduction=[0, 512]
+# CHECK: i8: split=512 parallel=[1, 0] reduction=[0, 512]
 run("i8", elem="i8", body=ADD.replace("addf", "addi"))
-# CHECK: sse: parallel=[1, 0] reduction=[0, 32]
+# CHECK: sse: split=32 parallel=[1, 0] reduction=[0, 32]
 run("sse", features=("sse4_2",))
 
-# Short rows are reduced whole; more rows share the chains.
-# CHECK: short_row: parallel=[2, 0] reduction=None unroll=[1, 0]
+# Short rows need no split and are reduced whole; more rows share the chains.
+# CHECK: short_row: split=None parallel=[2, 0] reduction=None unroll=[1, 0]
 run("short_row", cols="64")
 
-# No multiple of the vector width divides 4095: the reduced dim is not tiled.
-# CHECK: non_divisible: parallel=[1, 0] reduction=None unroll=[1, 0]
+# No multiple of the vector width divides 4095: neither split nor tiled.
+# CHECK: non_divisible: split=None parallel=[1, 0] reduction=None unroll=[1, 0]
 run("non_divisible", cols="4095")
 
 # Dynamic reduced extent: only the unit unroll shape is known.
-# CHECK: dynamic: parallel=None reduction=None unroll=[1, 0]
+# CHECK: dynamic: split=None parallel=None reduction=None unroll=[1, 0]
 run("dynamic", cols="?")
+
+# Non-associative combiner (acc - x) and index-dependent bodies cannot be split.
+# CHECK: sub_combiner: split=None
+run("sub_combiner", body=ADD.replace("%in, %out", "%out, %in").replace("add", "sub"))
+# CHECK: index_body: split=None
+run(
+    "index_body",
+    body="""%i = linalg.index 1 : index
+      %c = arith.index_cast %i : index to i32
+      %f = arith.sitofp %c : i32 to f32
+      %v = arith.addf %in, %f : f32
+      %s = arith.addf %v, %out : f32
+      linalg.yield %s : f32""",
+)
+
+# All split factors the split schedule enumerates.
+with TargetInfo.override(arch="x86_64", features=["avx512f"]):
+    print(f"split_factors={ReductionRegisterTiling.split_factors(TargetInfo.host())}")
+# CHECK: split_factors=[64, 128, 256, 512]

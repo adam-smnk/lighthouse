@@ -5,6 +5,7 @@ from mlir import ir
 from lighthouse.execution.target import TargetInfo
 from lighthouse.utils.mlir import (
     dim_position,
+    has_index_ops,
     indexing_maps,
     is_linalg_reduction_op,
     linalg_inputs,
@@ -59,6 +60,23 @@ class ReductionRegisterTiling:
 
     _ACC_CHAINS = 8
     _OUTER_RED_UNROLL = 2
+    # Combiners with a known neutral element, as required by split reduction.
+    _SPLITTABLE_COMBINERS = frozenset(
+        {
+            "arith.addf",
+            "arith.mulf",
+            "arith.maximumf",
+            "arith.minimumf",
+            "arith.maxnumf",
+            "arith.minnumf",
+            "arith.addi",
+            "arith.muli",
+            "arith.maxsi",
+            "arith.minsi",
+            "arith.maxui",
+            "arith.minui",
+        }
+    )
 
     @classmethod
     def vector_lanes(cls, target: TargetInfo | None, elem_type: ir.Type) -> int:
@@ -69,6 +87,13 @@ class ReductionRegisterTiling:
     def acc_chains(cls, target: TargetInfo | None) -> int:
         """Independent accumulators, capped to leave room for loads/temporaries."""
         return max(1, min(cls._ACC_CHAINS, register_info(target).count // 2))
+
+    @classmethod
+    def split_factors(cls, target: TargetInfo | None) -> list[int]:
+        """All split factors `split_factor` can return, one per compute width."""
+        width = register_info(target).width_bits
+        chains = cls.acc_chains(target)
+        return sorted({max(1, width // bits) * chains for bits in (8, 16, 32, 64)})
 
     @staticmethod
     def vector_dim(op: ir.OpView) -> int | None:
@@ -124,6 +149,47 @@ class ReductionRegisterTiling:
             lanes=cls.vector_lanes(target, elem),
             chains=cls.acc_chains(target),
         )
+
+    @classmethod
+    def _has_splittable_combiner(cls, op: ir.OpView) -> bool:
+        """Body yields `combiner(..., acc)` with a known neutral element."""
+        if len(op.regions) != 1 or not op.regions[0].blocks:
+            return False
+        # Splitting changes the iteration space seen by linalg.index.
+        if has_index_ops(op):
+            return False
+        block = op.regions[0].blocks[0]
+        terminator = list(block.operations)[-1]
+        if len(terminator.operands) != 1:
+            return False
+        yielded = terminator.operands[0]
+        if not isinstance(yielded.owner, (ir.Operation, ir.OpView)):
+            return False
+        combiner = opview(yielded.owner).operation
+        if combiner.name not in cls._SPLITTABLE_COMBINERS:
+            return False
+        acc = block.arguments[len(block.arguments) - 1]
+        return any(operand == acc for operand in combiner.operands)
+
+    @classmethod
+    def split_factor(
+        cls, op: ir.Operation | ir.OpView, target: TargetInfo | None
+    ) -> int | None:
+        """Split factor for a long inner reduction, or None if not splittable.
+
+        Splitting turns the per-chunk horizontal reductions into lane-wise
+        partial accumulation and a single horizontal reduction at the end.
+        """
+        info = cls._analyze(op, target)
+        if info is None or info.reduction_dims != [info.vector_dim]:
+            return None
+        if not cls._has_splittable_combiner(info.op):
+            return None
+        factor = info.lanes * info.chains
+        extent = info.extents[info.vector_dim]
+        if extent is None or extent <= factor or extent % factor != 0:
+            return None
+        return factor
 
     @classmethod
     def parallel_tiles(

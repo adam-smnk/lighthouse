@@ -396,6 +396,16 @@ def linalg_loop_extents(op: ir.Operation | ir.OpView) -> list[int | None] | None
     return extents
 
 
+def has_index_ops(op: ir.Operation | ir.OpView) -> bool:
+    """Whether the body of a linalg op reads its iteration indices (linalg.index)."""
+    return any(
+        inner.operation.name == "linalg.index"
+        for region in opview(op).regions
+        for block in region.blocks
+        for inner in block.operations
+    )
+
+
 def op_users(value: ir.Value) -> list[ir.Operation]:
     """Return the ops that use `value`."""
     users = []

@@ -25,6 +25,10 @@ Pipeline:
 
   ## Normalize ops to category.
   - pass: "linalg-categorize-ops"
+
+  ## Split long row reductions into lane-wise partial + short final reduction.
+  - schedule: "linalg.py[gen=split_inner_reductions]"
+  - include: cleanup.yaml
   
   ## 2) CPU register-level tiling - ensure data fits in registers.
   ## Parallel register tiles: assign/propagate from contraction anchors and fuse.
