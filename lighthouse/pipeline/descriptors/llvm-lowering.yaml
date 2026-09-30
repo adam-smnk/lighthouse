@@ -7,6 +7,7 @@ Pipeline:
   - pass: "finalize-memref-to-llvm"
   - pass: "convert-scf-to-cf"
   - pass: "convert-vector-to-llvm{vector-contract-lowering=outerproduct}"
+  - pass: "math-expand-ops{ops=fpowi}"
   - pass: "convert-math-to-llvm"
   - pass: "convert-math-to-libm"
   - pass: "convert-to-llvm"
