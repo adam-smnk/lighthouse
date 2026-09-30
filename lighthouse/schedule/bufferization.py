@@ -25,6 +25,7 @@ def bufferize(deallocation_pipeline: bool = False) -> ir.Module:
             target,
             function_boundary_type_conversion=LayoutMapOption.IdentityLayoutMap,
             bufferize_function_boundaries=True,
+            allow_return_allocs_from_loops=True,
         )
         target = apply_registered_pass(target, "drop-equivalent-buffer-results")
         if deallocation_pipeline:
