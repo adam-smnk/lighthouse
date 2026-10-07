@@ -8,6 +8,7 @@ from .common import (
     parallel_and_reduction_dims,
 )
 from .target_caps import (
+    assign_amx_reduction_tiles,
     generic_reduction_tiles,
     is_amx_bf16_contraction,
     is_f32_contraction,
@@ -31,7 +32,8 @@ class RegisterReductionTilingStrategy(TilingStrategy):
 
         ov = opview(op)
         if is_amx_bf16_contraction(ov, ctx.target):
-            red_tiles = [32]
+            assign_amx_reduction_tiles(ov, reduction_dims, sizes)
+            return sizes
         elif is_f32_contraction(ov):
             red_tiles = [2]
         else:

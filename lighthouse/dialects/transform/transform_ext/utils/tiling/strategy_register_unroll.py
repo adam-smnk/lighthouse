@@ -9,6 +9,7 @@ from .common import (
     parallel_and_reduction_dims,
 )
 from .target_caps import (
+    assign_amx_reduction_tiles,
     generic_parallel_tiles,
     generic_reduction_tiles,
     is_amx_bf16_contraction,
@@ -33,8 +34,9 @@ class RegisterUnrollTilingStrategy(TilingStrategy):
 
         ov = opview(op)
         if is_amx_bf16_contraction(ov, ctx.target):
-            par_tiles = [16, 16]
-            red_tiles = [32]
+            assign_parallel_tiles(parallel_dims, [16, 16], sizes)
+            assign_amx_reduction_tiles(ov, reduction_dims, sizes)
+            return sizes
         elif is_f32_contraction(ov):
             par_tiles = [1, 16]
             red_tiles = [1]

@@ -1,4 +1,5 @@
 import ctypes
+from functools import cache
 
 import torch
 from mlir import ir
@@ -10,6 +11,10 @@ from mlir.runtime.np_to_memref import (
 )
 
 from . import memref as memref_utils
+
+# A new descriptor class per call also makes ctypes build new pointer types per call.
+_nd_memref_descriptor = cache(make_nd_memref_descriptor)
+_zero_d_memref_descriptor = cache(make_zero_d_memref_descriptor)
 
 
 def torch_dtype_to_ctype(dtype: torch.dtype):
@@ -50,13 +55,13 @@ def to_memref(input: torch.Tensor) -> ctypes.Structure:
     data_ptr = input.data_ptr()
 
     if ndim == 0:
-        x = make_zero_d_memref_descriptor(ctp)()
+        x = _zero_d_memref_descriptor(ctp)()
         x.allocated = data_ptr
         x.aligned = ctypes.cast(data_ptr, ctypes.POINTER(ctp))
         x.offset = ctypes.c_longlong(0)
         return x
 
-    x = make_nd_memref_descriptor(ndim, ctp)()
+    x = _nd_memref_descriptor(ndim, ctp)()
     x.allocated = data_ptr
     x.aligned = ctypes.cast(data_ptr, ctypes.POINTER(ctp))
     x.offset = ctypes.c_longlong(0)

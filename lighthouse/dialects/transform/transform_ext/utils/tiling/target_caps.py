@@ -2,9 +2,15 @@ from mlir import ir
 from mlir.dialects import linalg
 
 from lighthouse.execution.target import TargetInfo
-from lighthouse.utils.mlir import linalg_inputs, linalg_outputs, opview
+from lighthouse.utils.mlir import (
+    dim_position,
+    indexing_maps,
+    linalg_inputs,
+    linalg_outputs,
+    opview,
+)
 
-from .common import parallel_and_reduction_dims
+from .common import assign_reduction_tiles, parallel_and_reduction_dims
 
 
 def _contraction_operand_types(
@@ -52,6 +58,64 @@ def is_f32_contraction(op: ir.Operation | ir.OpView) -> bool:
     """True for a contraction with all-f32 operands (lhs, rhs and acc)."""
     types = _contraction_operand_types(op)
     return types is not None and all(isinstance(t, ir.F32Type) for t in types)
+
+
+def vnni_reduction_dims(op: ir.Operation | ir.OpView) -> tuple[int, int, int] | None:
+    """``(k_dim, vnni_dim, vnni_factor)`` of a contraction in VNNI layout, else None.
+
+    Mirrors upstream ``x86::isInVnniLayout``: A is ``[..., K/v, v]`` and B is
+    ``[..., K/v, N, v]`` with both ``K/v`` and ``v`` reduction dims.
+    """
+    ov = opview(op)
+    maps = indexing_maps(ov)
+    inputs = linalg_inputs(ov)
+    if maps is None or inputs is None or len(inputs) < 2 or len(maps) != 3:
+        return None
+    type_a, type_b = (ir.ShapedType(v.type) for v in inputs[:2])
+    if type_a.rank < 3 or type_b.rank < 3:
+        return None
+    _, reduction = parallel_and_reduction_dims(maps[2])
+    map_a, map_b = maps[0].results, maps[1].results
+    vnni_a, vnni_b = dim_position(map_a[-1]), dim_position(map_b[-1])
+    k_a, k_b = dim_position(map_a[-2]), dim_position(map_b[-3])
+    n_b = dim_position(map_b[-2])
+    if (
+        vnni_a is None
+        or vnni_a != vnni_b
+        or vnni_a not in reduction
+        or k_a is None
+        or k_a != k_b
+        or k_a not in reduction
+        or n_b is None
+        or n_b in reduction
+    ):
+        return None
+    factor = type_b.shape[-1]
+    if (
+        ir.ShapedType.is_dynamic_size(factor)
+        or factor == 0
+        or factor % 2
+        or type_a.shape[-1] != factor
+        or type_a.shape[-2] != type_b.shape[-3]
+    ):
+        return None
+    return k_a, vnni_a, factor
+
+
+def assign_amx_reduction_tiles(
+    op: ir.Operation | ir.OpView, reduction_dims: list[int], sizes: list[int]
+) -> None:
+    """AMX reduction tiles: 32 K elements per tile, 16 K-pairs x 2 in VNNI layout."""
+    vnni = vnni_reduction_dims(op)
+    if vnni is None:
+        assign_reduction_tiles(reduction_dims, [32], sizes)
+        return
+    # The VNNI AMX microkernel reads a 16 x (16 * factor) tile per operand.
+    k_dim, vnni_dim, factor = vnni
+    for dim in reduction_dims:
+        sizes[dim] = 1
+    sizes[k_dim] = 16
+    sizes[vnni_dim] = factor
 
 
 def vector_lane_count(target: TargetInfo | None, elem_type: ir.Type) -> int:
