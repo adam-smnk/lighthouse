@@ -219,6 +219,26 @@ with TargetInfo.override(arch="x86_64", features=["avx512f"]):
     )
 
 
+# Reduced dims shorter than a vector (e.g. a 4x4 pooling window) have no lanes
+# to fill: unit-tiling the outer window dim would unroll the op per element.
+# CHECK-LABEL: Test: register_reduction_short_window
+# CHECK: linalg.generic
+# CHECK-NOT: transform_ext.tile_sizes
+# CHECK: return
+with TargetInfo.override(arch="x86_64", features=["avx512f"]):
+    run(
+        "register_reduction_short_window",
+        reduce_payload(
+            "(d0, d1, d2) -> (d0, d1, d2)",
+            "(d0, d1, d2) -> (d0)",
+            '"parallel", "reduction", "reduction"',
+            "64x4x4xf32",
+            "64xf32",
+        ),
+        lambda: build_schedule("linalg.generic"),
+    )
+
+
 # No reduction dim: the op must be left unannotated.
 # CHECK-LABEL: Test: register_reduction_no_reduction_dims
 # CHECK: linalg.elementwise

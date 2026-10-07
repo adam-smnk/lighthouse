@@ -379,6 +379,26 @@ def column_reduce(shape):
 with TargetInfo.override(arch="x86_64", features=["avx512f"]):
     run("reduction_register_parallel_row", ROW_REDUCE, build_reduction_schedule)
 
+
+# A reduced dim shorter than a vector (e.g. a pooling window) has no lanes to
+# fill: the op is left to its neighbours' tiles.
+# CHECK-LABEL: Test: reduction_register_parallel_short_row
+# CHECK: linalg.generic
+# CHECK-NOT: transform_ext.tile_sizes
+# CHECK: return
+with TargetInfo.override(arch="x86_64", features=["avx512f"]):
+    run(
+        "reduction_register_parallel_short_row",
+        reduce_payload(
+            "(d0, d1) -> (d0, d1)",
+            "(d0, d1) -> (d0)",
+            '"parallel", "reduction"',
+            "64x4xf32",
+            "64xf32",
+        ),
+        build_reduction_schedule,
+    )
+
 # A split partial reduction keeps lanes x chains independent accumulators.
 # CHECK-LABEL: Test: reduction_register_parallel_partial
 # CHECK: linalg.generic

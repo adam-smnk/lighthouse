@@ -143,11 +143,43 @@ def assign_reduction_tile_sizes(
     return sched
 
 
+def _merge_loop_handles(loop_handles):
+    """Normalize loop handles to a single handle when possible."""
+    try:
+        loops = list(loop_handles)
+    except TypeError:
+        return loop_handles
+    if len(loops) == 1:
+        return loops[0]
+    return transform.merge_handles(loops)
+
+
+# Named candidate filters: descriptor parameters are strings.
+_CANDIDATE_FILTERS = {
+    "contractions": transform_ext.filter_contraction_ops,
+    "elementwise": transform_ext.filter_elementwise,
+    "non_contraction_reductions": transform_ext.filter_non_contraction_reductions,
+}
+
+
+def _candidate_filter(name: str | None):
+    """The filter registered as `name` (None: keep all candidates)."""
+    if name is None:
+        return None
+    if name not in _CANDIDATE_FILTERS:
+        raise ValueError(
+            f"Unknown candidate_filter {name!r}; expected one of "
+            f"{sorted(_CANDIDATE_FILTERS)}"
+        )
+    return _CANDIDATE_FILTERS[name]
+
+
 def _execute_annotated(
     target_op: str | list[str] | None,
     use_forall: bool,
     clear_annotations: bool,
     action: str,
+    candidate_filter: str | None = None,
 ) -> ir.Module:
     """Execute annotated tiling actions for matched ops.
 
@@ -161,25 +193,20 @@ def _execute_annotated(
         use_forall: Use ``scf.forall`` for tiling when supported by the action.
         clear_annotations: Clear tile/fuse annotations on produced loop handles.
         action: Action to perform.
+        candidate_filter: Name of a filter narrowing the candidates (e.g.
+            ``"non_contraction_reductions"``); producers outside it are still
+            fused. Defaults to no filtering.
     Returns:
         Schedule
     """
-
-    def _merge_loop_handles(loop_handles):
-        """Normalize loop handles to a single handle when possible."""
-        try:
-            loops = list(loop_handles)
-        except TypeError:
-            return loop_handles
-        if len(loops) == 1:
-            return loops[0]
-        return transform.merge_handles(loops)
-
+    filter_fn = _candidate_filter(candidate_filter)
     if target_op is None:
         target_op = structured.MatchInterfaceEnum.LinalgOp
 
     with schedule_boilerplate() as (sched, named_seq):
         candidates = lh_transform.match_op(named_seq.bodyTarget, target_op)
+        if filter_fn is not None:
+            candidates = filter_fn(candidates)
         if action == "fuse":
             targets = transform_ext.get_fusion_roots(candidates)
         else:
@@ -226,6 +253,7 @@ def tile_and_fuse_annotated(
     target_op: str | list[str] | None = None,
     use_forall: bool = True,
     clear_annotations: bool = True,
+    candidate_filter: str | None = None,
 ) -> ir.Module:
     """
     Tile and fuse annotated groups.
@@ -238,6 +266,7 @@ def tile_and_fuse_annotated(
         target_op: Candidate op(s) to consider. Defaults to all linalg ops.
         use_forall: Generate `scf.forall` loops (parallel) when tiling.
         clear_annotations: Clear the annotations from the fused ops.
+        candidate_filter: Name of a filter narrowing the candidates.
     Returns:
         Schedule
     """
@@ -246,6 +275,7 @@ def tile_and_fuse_annotated(
         use_forall=use_forall,
         clear_annotations=clear_annotations,
         action="fuse",
+        candidate_filter=candidate_filter,
     )
 
 
@@ -253,6 +283,7 @@ def tile_annotated(
     target_op: str | list[str] | None = None,
     use_forall: bool = False,
     clear_annotations: bool = True,
+    candidate_filter: str | None = None,
 ) -> ir.Module:
     """
     Tile annotated ops with its tile sizes.
@@ -261,6 +292,7 @@ def tile_annotated(
         target_op: Candidate op(s) to consider. Defaults to all linalg ops.
         use_forall: Generate `scf.forall` loops (parallel) when tiling.
         clear_annotations: Clear the annotations from the tiled ops.
+        candidate_filter: Name of a filter narrowing the candidates.
     Returns:
         Schedule
     """
@@ -269,6 +301,7 @@ def tile_annotated(
         use_forall=use_forall,
         clear_annotations=clear_annotations,
         action="tile",
+        candidate_filter=candidate_filter,
     )
 
 

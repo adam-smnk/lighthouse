@@ -49,7 +49,7 @@ class RegisterReductionTilingStrategy(TilingStrategy):
             lanes = EltwiseRegisterTiling.lane_count(target, info.elem_type)
             limit = lanes * reduction_acc_chains(target)
             dim_size = dim_sizes[info.vector_dim]
-            if dim_size is None:
+            if dim_size is None or dim_size < lanes:
                 return None
             # Short enough for one horizontal reduction: keep it whole.
             if dim_size <= limit:

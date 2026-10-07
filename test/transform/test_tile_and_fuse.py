@@ -982,3 +982,72 @@ module {
 # CHECK: scf.forall ({{.*}}) = (0, 0) to (64, 64) step (32, 32)
 # CHECK: math.sqrt
 run("all_zero_tile_sizes_untiled", ZERO_TILES, tile_and_fuse)
+
+
+# bf16 -> f32 conversion feeding a row sum, next to an independent matmul.
+REDUCE_PRODUCER = """
+#id = affine_map<(d0, d1) -> (d0, d1)>
+#row = affine_map<(d0, d1) -> (d0)>
+module {
+  func.func @main(%a: tensor<64x4096xbf16>, %s: tensor<64xf32>,
+      %x: tensor<64x64xf32>, %w: tensor<64x64xf32>, %c: tensor<64x64xf32>)
+      -> (tensor<64xf32>, tensor<64x64xf32>) {
+    %e = tensor.empty() : tensor<64x4096xf32>
+    %ext = linalg.generic {indexing_maps = [#id, #id],
+        iterator_types = ["parallel", "parallel"]}
+        ins(%a : tensor<64x4096xbf16>) outs(%e : tensor<64x4096xf32>) {
+    ^bb0(%in: bf16, %o: f32):
+      %f = arith.extf %in : bf16 to f32
+      linalg.yield %f : f32
+    } -> tensor<64x4096xf32>
+    %sum = linalg.generic {indexing_maps = [#id, #row],
+        iterator_types = ["parallel", "reduction"]}
+        ins(%ext : tensor<64x4096xf32>) outs(%s : tensor<64xf32>) {
+    ^bb0(%in: f32, %acc: f32):
+      %r = arith.addf %in, %acc : f32
+      linalg.yield %r : f32
+    } -> tensor<64xf32>
+    %mm = linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+        ins(%x, %w : tensor<64x64xf32>, tensor<64x64xf32>)
+        outs(%c : tensor<64x64xf32>) -> tensor<64x64xf32>
+    return %sum, %mm : tensor<64xf32>, tensor<64x64xf32>
+  }
+}
+"""
+
+
+def assign_register_reduction():
+    return tf.assign_reduction_tile_sizes(strategy="register_reduction")
+
+
+def tile_and_fuse_reductions():
+    return tf.tile_and_fuse_annotated(
+        use_forall=False, candidate_filter="non_contraction_reductions"
+    )
+
+
+# The reduction is tiled along its reduced dim with its producer fused into the
+# loop (no full-size f32 temporary); the annotated matmul is not a candidate.
+# CHECK-LABEL: Test: reduction_producer_fused
+# CHECK-NOT: linalg.generic
+# CHECK: scf.for {{.*}} = %c0 to %c4096 step %c128
+# CHECK: arith.extf
+# CHECK: } -> tensor<64x128xf32>
+# CHECK: arith.addf
+# CHECK: scf.yield
+# CHECK: linalg.matmul {transform_ext.tile_sizes = array<i64: 32, 32, 0>}
+run(
+    "reduction_producer_fused",
+    REDUCE_PRODUCER,
+    assign_register_reduction,
+    tile_and_fuse_reductions,
+)
+
+
+# CHECK-LABEL: Test: unknown_candidate_filter
+# CHECK: ValueError: Unknown candidate_filter 'unknown'
+print("Test: unknown_candidate_filter")
+try:
+    tf.tile_and_fuse_annotated(candidate_filter="unknown")
+except ValueError as e:
+    print(f"ValueError: {e}")

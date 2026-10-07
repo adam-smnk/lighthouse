@@ -33,11 +33,14 @@ class RegisterUnrollTilingStrategy(TilingStrategy):
         if info is None:
             return None
         sizes = [1] * len(info.dim_sizes)
+        lanes = EltwiseRegisterTiling.lane_count(target, info.elem_type)
         if info.inner:
+            red_dim_size = info.dim_sizes[info.vector_dim]
+            if red_dim_size is not None and red_dim_size < lanes:
+                return None
             # Keep a single wide horizontal reduction instead of a serial chain.
             sizes[info.vector_dim] = 0
         else:
-            lanes = EltwiseRegisterTiling.lane_count(target, info.elem_type)
             tile = largest_multiple_divisor(
                 info.dim_sizes[info.vector_dim], lanes, lanes
             )
@@ -56,7 +59,9 @@ class RegisterUnrollTilingStrategy(TilingStrategy):
         ov = opview(op)
         # Reductions may have no parallel dims left (e.g. a rank-1 row reduction).
         if is_linalg_reduction_op(ov):
-            return self._reduction_op_tiles(ov, ctx.target)
+            tiles = self._reduction_op_tiles(ov, ctx.target)
+            if tiles is not None:
+                return tiles
 
         sizes = [0] * out_map.n_dims
         parallel_dims, reduction_dims = parallel_and_reduction_dims(out_map)

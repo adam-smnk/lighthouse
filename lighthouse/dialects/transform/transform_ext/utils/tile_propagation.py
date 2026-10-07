@@ -101,6 +101,25 @@ def tiles_on_value(
     return tiles
 
 
+def tiles_beyond_value(
+    op: ir.Operation | ir.OpView, sizes: Sequence[int], value: ir.Value
+) -> bool:
+    """Whether `op`, tiled by `sizes`, tiles a loop dim that `value` does not
+    index (e.g. the columns of a consumer of a row reduction's result).
+
+    Fused into such a tile loop, the producer of `value` is recomputed per tile.
+    """
+    ov = opview(op)
+    maps = indexing_maps(ov)
+    if maps is None:
+        return False
+    value_map = _map_for_value(ov, value, maps)
+    if value_map is None:
+        return False
+    indexed = {dim_position(expr) for expr in value_map.results}
+    return any(size and dim not in indexed for dim, size in enumerate(sizes))
+
+
 def compatible_on_value(
     src_op: ir.Operation | ir.OpView,
     src_sizes: Sequence[int],

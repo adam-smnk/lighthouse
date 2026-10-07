@@ -81,6 +81,19 @@ with TargetInfo.override(features=["avx512f"]):
     )
 
 
+# A reduced dim shorter than a vector (e.g. a pooling window) is not kept whole
+# as one horizontal reduction: the generic unroll tiling vectorizes the rows.
+# CHECK-LABEL: Test: register_unroll_short_reduce
+# CHECK: linalg.generic
+# CHECK-SAME: transform_ext.tile_sizes = array<i64: 16, 1>
+with TargetInfo.override(features=["avx512f"]):
+    run(
+        "register_unroll_short_reduce",
+        GENERIC_REDUCE.replace("64x256", "64x4"),
+        lambda: build_schedule("linalg.generic"),
+    )
+
+
 # A column (outer) reduction unrolls to one vector register along its
 # contiguous parallel dim.
 COLUMN_REDUCE = """

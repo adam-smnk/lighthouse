@@ -131,7 +131,9 @@ class RegisterParallelTilingStrategy(TilingStrategy):
 
         if info.inner:
             red_dim_size = dim_sizes[info.vector_dim]
-            if red_dim_size is None:
+            # A reduced dim shorter than a vector (e.g. a pooling window) has
+            # no lanes to fill: leave the op to its neighbours' tiles.
+            if red_dim_size is None or red_dim_size < lanes:
                 return None
             unroll = max(1, min(chains, red_dim_size // lanes))
             rows_dim = info.parallel_dims[-1]
