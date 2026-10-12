@@ -2,9 +2,9 @@ from mlir import ir
 from mlir.dialects import linalg
 
 from lighthouse.execution.target import RegisterInfo, TargetInfo
-from lighthouse.utils.mlir import linalg_inputs, linalg_outputs, opview
+from lighthouse.utils.mlir import dim_position, linalg_inputs, linalg_outputs, opview
 
-from .common import parallel_and_reduction_dims
+from .common import largest_divisor, parallel_and_reduction_dims
 
 # Rough upper bound on independent vector accumulators hiding the combiner latency.
 # TODO: Derive from the combiner kind, element type and target.
@@ -73,6 +73,32 @@ def storage_lane_count(target: TargetInfo | None, elem_type: ir.Type) -> int:
     return 16
 
 
+def _vector_tiles(extents: list[int], lanes: int) -> list[int]:
+    """Tiles of the trailing dims of `extents` spanning one vector of `lanes`.
+
+    Inner dims narrower than the vector are taken whole and the next dims
+    tiled by a divisor of the lanes left, so a narrow innermost dim (e.g. VNNI
+    pairs) does not shrink the tiles to a few elements.
+    """
+    tiles: list[int] = []
+    remaining = lanes
+    for extent in reversed(extents):
+        dynamic = ir.ShapedType.is_dynamic_size(extent)
+        if not tiles and (dynamic or extent >= lanes):
+            return [lanes]
+        if dynamic:
+            tiles.append(1)
+            break
+        if extent >= remaining:
+            tiles.append(largest_divisor(extent, remaining))
+            break
+        tiles.append(max(1, extent))
+        remaining //= tiles[-1]
+        if remaining <= 1:
+            break
+    return tiles[::-1]
+
+
 def generic_parallel_tiles(
     op: ir.Operation | ir.OpView,
     out_map: ir.AffineMap,
@@ -82,9 +108,14 @@ def generic_parallel_tiles(
     parallel_dims, _ = parallel_and_reduction_dims(out_map)
     if not parallel_dims:
         return []
-    out_elem = ir.ShapedType(linalg_outputs(op)[0].type).element_type
-    inner = storage_lane_count(target, out_elem)
-    return [inner] if len(parallel_dims) == 1 else [1, inner]
+    out_type = ir.ShapedType(linalg_outputs(op)[0].type)
+    inner = storage_lane_count(target, out_type.element_type)
+    extents = [
+        out_type.shape[i]
+        for i, expr in enumerate(out_map.results)
+        if dim_position(expr) is not None
+    ]
+    return _vector_tiles(extents, inner)
 
 
 def generic_reduction_tiles() -> list[int]:
