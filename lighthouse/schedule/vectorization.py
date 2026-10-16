@@ -29,6 +29,7 @@ def vectorize_linalg() -> ir.Module:
         lh_transform.cleanup(named_seq.bodyTarget)
 
         transform.yield_()
+    print(schedule, flush=True)
     return schedule
 
 
