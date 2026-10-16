@@ -1,5 +1,6 @@
 # Bufferization and lower levels, should be common to all pipelines
 Pipeline:
+  # - schedule: "helion_transforms.py[gen=fold_empty_slices]"
   ## Bufferization
   - include: bufferization.yaml
   - include: bufferization-cleanup.yaml
@@ -10,7 +11,14 @@ Pipeline:
   - schedule: "vectorization.py[gen=x86_vectorization]"
   - schedule: "vectorization.py[gen=vectorize_all]"
   - schedule: "vectorization.py[gen=lower_vector_multi_reductions]"
+
+  # - schedule: "helion_transforms.py[gen=unroll_transfers]"
+
   - schedule: "vectorization.py[gen=flatten_vector_ops]"
+
+  - schedule: "helion_transforms.py[gen=linearize_vector_ops]"
+  - pass: "func.func(lower-vector-multi-reduction)"
+  - schedule: "helion_transforms.py[gen=approximate_math]"
 
   ## Lower to LLVM
   - include: llvm-lowering.yaml
