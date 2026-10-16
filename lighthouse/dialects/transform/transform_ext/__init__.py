@@ -40,6 +40,7 @@ from .ops.sink_extract_slice_into_loop import sink_extract_slice_into_loop
 from .ops.sink_normalization_past_contraction import (
     sink_normalization_past_contraction,
 )
+from .ops.remove_asserts import remove_asserts
 
 __all__ = [
     "REDUCTION_LOOP_ATTR_NAME",
@@ -73,6 +74,7 @@ __all__ = [
     "param_cmp_eq",
     "propagate_tile_sizes",
     "register_and_load",
+    "remove_asserts",
     "replace",
     "reverse_handles",
     "sfc_remap_forall",
