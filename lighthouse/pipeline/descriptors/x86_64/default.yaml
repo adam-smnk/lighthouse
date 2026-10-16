@@ -6,7 +6,8 @@ Pipeline:
   - include: cleanup.yaml
 
   ## Initial elementwise operations fusion to group them.
-  - pass: "linalg-fuse-elementwise-ops"
+  # - pass: "linalg-fuse-elementwise-ops"
+  - pass: "linalg-fold-unit-extent-dims"
 
   ## CPU layout packing.
   - include: pack.yaml {
@@ -57,6 +58,7 @@ Pipeline:
   ## 3) CPU register-level unrolling via tiling - ensure hardware-friendly shapes.
   - include: unroll-register.yaml
   - include: cleanup.yaml
+  # - schedule: "helion_transforms.py[gen=fold_empty_slices]"
 
   - include: vectorize.yaml
 
