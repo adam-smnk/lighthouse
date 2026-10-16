@@ -1,9 +1,12 @@
 # The default optimizing pipeline for x86 architecture.
 Pipeline:
-  # - pass: print-ir
+  # Remove asserts - their presence within Linalg op regions
+  # breaks elementwise fusion and blocks vectorization.
+  - schedule: "debug.py[gen=remove_asserts]"
+  - include: cleanup.yaml
+
   ## Initial elementwise operations fusion to group them.
-  # - pass: "linalg-fuse-elementwise-ops"
-  # - pass: print-ir
+  - pass: "linalg-fuse-elementwise-ops"
 
   ## CPU layout packing.
   - include: pack.yaml {
@@ -11,6 +14,7 @@ Pipeline:
                           tile_size=32
                         }
   # - pass: print-ir
+  - schedule: "linalg.py[gen=linalg_contract_fold_unit_dims]"
 
   ## 1) CPU cache-level tiling - improves data locality and exposes parallelism.
   - include: tile-and-fuse.yaml {
